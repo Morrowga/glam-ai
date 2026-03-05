@@ -1,0 +1,178 @@
+```
+## 🎯 Project: GlamAI — AI Makeup Try-On Platform
+
+### Purpose
+A web platform where users upload a bare face photo, select makeup products from any brand, and get an AI-generated result showing how that product looks on their face. No AR, no realtime — upload and get result. Target users: girls age 14-100.
+
+### Core Flow
+```
+User uploads bare face photo
+→ Gate 1: Face validation (face exists, front facing, good quality)
+→ Gate 2: Makeup detection (reject if already wearing makeup)
+→ Gate 3: Skin tone detection (classify fair/light/medium/tan/deep/rich)
+→ User selects: Brand → Category → Product → Shade (multiple categories allowed, one brand/product/shade per category)
+→ Prompt engine builds massive detailed prompt (brand DNA + category formula + shade science + skin tone)
+→ gpt-image-1 generates result
+→ For multi-category: chained generation (result of category 1 becomes input of category 2)
+→ Result saved, job tracked
+```
+
+---
+
+### Tech Stack
+```
+Backend:    Python + FastAPI
+Database:   SQLite (local dev) → PostgreSQL (production)
+AI:         OpenAI gpt-image-1 (images.edit endpoint)
+Cloud:      AWS (Singapore ap-southeast-1) — not started yet
+Storage:    AWS S3 — not started yet
+Auth:       AWS Cognito — not started yet
+Frontend:   Next.js 14 + TypeScript + Tailwind — not started yet
+```
+
+---
+
+### Project Structure
+```
+glamai/
+├── .env
+├── requirements.txt
+├── main.py                        ← FastAPI endpoints
+├── db/
+│   ├── __init__.py
+│   └── models.py                  ← Brand, Category, Product, Shade, GenerationJob, ReferenceImage
+├── engine/
+│   ├── __init__.py
+│   ├── prompt_engine.py           ← Prompt builder (brand DNA + category + shade + skin tone aware)
+│   ├── brand_dna.py               ← Per-brand AI style guide (persona, finish, texture, skin tone approach)
+│   └── generator.py               ← OpenAI gpt-image-1 integration
+├── brands/
+│   ├── __init__.py
+│   └── seed_nyx.py                ← NYX brand + all categories + products + shades seeder
+├── scripts/
+│   └── test_generation.py
+└── results/                       ← AI generated images saved here
+└── uploads/                       ← User uploaded photos saved here
+```
+
+---
+
+### Database Models
+```
+Brand       — id, name, slug, country, tier, is_active
+Category    — id, name, slug, application_zone (lips/eyes/cheeks/face)
+Product     — id, brand_id, category_id, name, slug, description, is_active
+Shade       — id, product_id, name, hex_color, finish_type, coverage, prompt_supplement, is_active
+GenerationJob — id, shade_id, upload_path, prompt_used, result_path, status, generation_time, error_message, completed_at
+ReferenceImage — id, shade_id, skin_tone, image_path, source
+```
+
+---
+
+### What's Built & Working ✅
+```
+✅ FastAPI project structure
+✅ SQLAlchemy async models
+✅ NYX Professional Makeup fully seeded:
+   - 13 categories (lipstick, lip-gloss, lip-liner, eyeshadow, eyeliner,
+     mascara, eyebrow, foundation, blush, bronzer, highlighter, contour, concealer)
+   - 13 products (one per category)
+   - 70+ shades with accurate hex colors, finish types, coverage
+✅ brand_dna.py — 20 brands with unique AI personas, finish signatures,
+   texture language, application style, skin tone approach, lighting quality,
+   realism anchors (NYX, MAC, Charlotte Tilbury, NARS, Fenty, Huda, 3CE, ROMAND,
+   Srichand, Mistine, Maybelline, L'Oreal, e.l.f., Too Faced, Urban Decay,
+   Benefit, Rare Beauty, Dior, Chanel, YSL)
+✅ prompt_engine.py v2 — per category prompt builders with:
+   - Brand DNA injection
+   - Hex color science (brightness, undertone, depth auto-detected)
+   - Skin tone aware language
+   - Finish type maps per category
+   - Global realism anchors (prevents cartoon/filter results)
+✅ generator.py — generate_with_image_edit() using gpt-image-1 images.edit
+✅ All REST endpoints working:
+   GET  /brands
+   GET  /brands/{brand_slug}/categories
+   GET  /brands/{brand_slug}/{category_slug}/products
+   GET  /products/{product_id}/shades
+   POST /upload
+   POST /generate  (single category)
+   GET  /jobs/{job_id}
+✅ Job tracking (processing / complete / failed)
+✅ Swagger UI at http://localhost:8000/docs
+✅ Initial generation tested and working
+```
+
+---
+
+### What Needs To Be Built Next 🔧
+```
+Priority 1 — GATES (before generation)
+  □ Gate 1: Face validation
+      - Detect face exists, front facing, not blurry
+      - Library: mediapipe
+      - New endpoint or integrated into /upload
+
+  □ Gate 2: Makeup detection
+      - Reject photo if person already wearing makeup
+      - Approach: GPT-4o vision "is this person wearing makeup? answer yes or no only"
+      - Integrate into /upload flow
+
+  □ Gate 3: Skin tone detection
+      - Sample pixels from face landmarks (forehead, cheeks, chin)
+      - Classify: fair / light / medium / tan / deep / rich
+      - Pass detected_skin_tone into prompt engine
+      - Library: mediapipe for landmarks + pixel sampling
+
+Priority 2 — MULTI CATEGORY GENERATION (core UX)
+  □ /generate-multi endpoint
+      - Input: array of shade_ids + one upload_path
+      - One brand, one product, one shade per category
+      - Multiple categories per request
+
+  □ Chained generation logic
+      - Result of category 1 becomes input image for category 2
+      - Applies makeup layers realistically on top of each other
+      - Order matters: foundation first → concealer → eyes → lips → cheeks
+
+Priority 3 — QUALITY
+  □ prompt_supplement data
+      - Fill prompt_supplement field in Shade records for tricky shades
+      - Very dark shades, unusual finishes, glitter, duochrome etc.
+
+  □ Reference image pipeline (future)
+      - ReferenceImage model already exists in DB
+      - Scraper for product swatch/model images
+      - Feed reference images into generation
+```
+
+---
+
+### Current API Call Example (Working)
+```
+POST /upload          → { upload_path: "uploads/abc123.jpg" }
+GET /brands/nyx/categories → list of 13 categories
+GET /brands/nyx/lipstick/products → NYX Matte Lipstick
+GET /products/{id}/shades → shades with ids
+POST /generate        → { shade_id, upload_path }
+                      → { job_id, result_path, prompt_used, generation_time }
+```
+
+---
+
+### Prompt Engine Architecture (Important Context)
+```
+build_prompt(category_slug, product_data) where product_data contains:
+  brand_name, brand_slug, product_name, shade_name,
+  hex_color, finish_type, coverage, prompt_supplement
+
+Internally:
+  1. get_brand_dna(brand_slug) → brand persona, finish signature, texture, skin tone approach
+  2. _hex_to_rgb() → brightness + undertone + depth description
+  3. _skin_tone_guidance() → skin tone aware instructions based on shade depth
+  4. Category builder (e.g. _lipstick_prompt) → assembles full prompt
+  5. GLOBAL_REALISM appended → prevents AI slop, cartoon, filter results
+
+detected_skin_tone (from Gate 3) needs to be added as parameter — NOT YET IMPLEMENTED
+```
+

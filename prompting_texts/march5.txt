@@ -1,0 +1,43 @@
+Based on everything built so far, here's the generation pipeline breakdown:
+
+---
+
+**✅ DONE**
+- Single category, single shade generation
+- Prompt engine with color science + skin texture preservation
+- Job tracking
+- All REST endpoints
+
+---
+
+**NEXT — Generation Pipeline Only**
+
+**1. Gates** *(input validation before burning API credits)*
+- Gate 1: Face validation — face exists, front facing, not blurry
+- Gate 2: Makeup detection — reject if already wearing makeup
+- Gate 3: Skin tone detection — classify fair/light/medium/tan/deep/rich → pass into prompt
+
+**2. Reference Images**
+- Switch `generator.py` from `images.edit` → Responses API
+- `ReferenceImage` model already exists in DB
+- Scraper/collector for NYX swatch images per shade
+- Feed 1-3 reference images per generation call
+- Test color accuracy improvement per category
+
+**3. Multi-Category Chained Generation**
+- `/generate-multi` endpoint
+- Input: array of shade_ids + one upload_path
+- Chained: result of category 1 becomes input image for category 2
+- Application order matters: `foundation → concealer → eyeshadow → eyeliner → mascara → eyebrow → blush → bronzer → contour → highlighter → lipstick → lip-liner → lip-gloss`
+- Job tracking per chain step
+
+**4. Prompt Supplements**
+- Fill `prompt_supplement` field for tricky shades
+- Dark shades, glitter, duochrome, unusual finishes
+- Improves accuracy for edge case shades
+
+---
+
+Suggested order: **Gates → References → Multi-category → Supplements**
+
+Gates first because they protect every generation call. References second because they improve quality before you scale to multi-category. Which one do you want to start with?

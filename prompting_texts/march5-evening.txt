@@ -1,0 +1,77 @@
+Here's your handoff prompt for the next chat:
+
+---
+
+**GlamAI — Handoff Prompt**
+
+I am building GlamAI, an AI-powered makeup try-on platform. Here is the current state and what needs to be built next.
+
+**Tech stack:**
+- FastAPI + SQLAlchemy async + SQLite (moving to PostgreSQL on AWS)
+- OpenAI gpt-image-1 via `images.edit` endpoint
+- Python 3.11
+
+**Generation pipeline — COMPLETE ✅**
+- `engine/generator.py` — gpt-image-1 `images.edit` with multiple images support (face photo + reference images array)
+- `engine/prompt_engine.py` — prompt builder per category with skin texture preservation block (`SKIN_TEXTURE`), hex to color description, `prompt_supplement` per shade
+- `db/models.py` — Brand, Category, Product, Shade, ReferenceImage, GenerationJob
+- `brands/nyx/seed_nyx.py` — NYX full seed, 13 categories, all products/shades with `prompt_supplement`
+- `brands/seed_references.py` — general reference image seeder, scans `references/{brand}/{product}/{shade}/` folder
+- All REST endpoints working: `/upload`, `/generate`, `/jobs/{id}`, `/brands`, `/products`, `/shades`
+- Reference images: pass up to 3 per shade into API, stored in `ReferenceImage` table
+- Cost per generation: ~$0.055 with references
+
+**Data collection — IN PROGRESS**
+- Collecting reference images per shade for NYX (swatch + model shot per shade)
+- Folder: `references/nyx/{product-slug}/{shade-slug}/model.jpg` etc.
+- Run `python brands/seed_references.py --brand nyx` after adding images
+
+---
+
+**NEXT TO BUILD:**
+
+**1. Generation Gates** *(run before generation to validate input)*
+- Gate 1: Face validation — detect face exists, front-facing, not blurry
+- Gate 2: Makeup detection — reject if user already wearing makeup
+- Gate 3: Skin tone detection — classify fair/light/medium/tan/deep/rich → pass into `build_prompt(detected_skin_tone=...)`
+
+**2. Multi-category chained generation**
+- `/generate-multi` endpoint
+- Input: array of `shade_ids` + one `upload_path`
+- Chain: result of step N becomes `input_path` of step N+1
+- Application order: `foundation → concealer → eyeshadow → eyeliner → mascara → eyebrow → blush → bronzer → contour → highlighter → lipstick → lip-liner → lip-gloss`
+- Track each step as separate `GenerationJob` with same `session_id`
+
+**3. AWS Infrastructure**
+- EC2 or ECS for FastAPI backend
+- RDS PostgreSQL (replace SQLite)
+- S3 for uploads, results, reference images
+- CloudFront CDN for serving result images
+- SQS queue for generation jobs (handle rate limits gracefully)
+- Secrets Manager for API keys
+
+**4. Job Queue system**
+- Currently generation is synchronous — blocks until done (~10-15s)
+- Need async queue: user submits → gets `job_id` → polls `/jobs/{job_id}` for status
+- SQS + worker process OR Redis + Celery
+- Handles OpenAI rate limits with exponential backoff (already have `tenacity` installed)
+
+**5. Prompt supplements**
+- Fill remaining empty `prompt_supplement` fields in `seed_nyx.py` for tricky shades
+- After testing with references, identify which shades are still color-inaccurate and add descriptions
+
+---
+
+**Pricing model:**
+- 3 free credits on account creation (one-time)
+- $4/month — 30 credits
+- $10/month — 100 credits
+- Cost per generation ~$0.055, target margin ~$2,300/month at 750 paying users
+
+**OpenAI tier needed:**
+- 1,000 users → Tier 2 ($50 spend, 15 RPM)
+- 10,000+ users → Tier 3 + contact OpenAI for custom limits
+
+---
+
+Start with **Gates** then **Multi-category** then **AWS**.

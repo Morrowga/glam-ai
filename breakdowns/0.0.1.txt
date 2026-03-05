@@ -1,0 +1,57 @@
+Here's your complete generation pipeline — what's done and what's left to build:
+
+---
+
+**DONE ✅**
+```
+1. Upload photo endpoint
+2. Brand / Category / Product / Shade DB + API
+3. Prompt engine (brand DNA + category + shade)
+4. gpt-image-1 generation endpoint
+5. Job tracking (processing / complete / failed)
+```
+
+---
+
+**LEFT TO BUILD 🔧**
+
+**Gate 1 — Face Validation**
+- Detect a face exists in photo
+- Reject if no face, side profile, too dark, blurry
+- Library: `mediapipe`
+
+**Gate 2 — Makeup Detection**
+- Reject if person already wearing makeup
+- Use GPT-4o vision — ask "is this person wearing makeup? yes or no"
+- Fast, no extra library needed
+
+**Gate 3 — Skin Tone Detection**
+- Sample face pixels using mediapipe landmarks
+- Classify into: fair / light / medium / tan / deep / rich
+- Pass detected skin tone into prompt engine
+- This makes results dramatically more accurate
+
+**Core — Multi Category Generation**
+- User selects multiple categories (lipstick + blush + eyeliner etc.)
+- Single brand, single product, single shade per category
+- New `/generate-multi` endpoint takes array of shade_ids + one photo
+- Chained generation — result of first category becomes input of next
+- So lipstick applies on bare face → blush applies on top of that result → etc.
+
+**Quality — Prompt supplement per shade**
+- Your Shade model already has `prompt_supplement` field
+- Fill this with extra per-shade instructions for tricky shades
+- Example: very dark shades, unusual finishes, glitter etc.
+
+---
+
+**Build order recommendation:**
+```
+1. Makeup detection     ← gate, most important
+2. Face validation      ← gate
+3. Skin tone detection  ← quality
+4. /generate-multi      ← core UX
+5. Chained generation   ← core UX
+```
+
+That's everything between you and a fully working generation pipeline.
