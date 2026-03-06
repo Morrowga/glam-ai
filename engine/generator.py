@@ -1,22 +1,74 @@
 """
-GlamAI Generator v9 — images.edit with multiple images
-=======================================================
-gpt-image-1 images.edit supports up to 16 images in an array.
-Pass [face_photo, ref1, ref2, ...] — no Responses API needed.
+GlamAI Generator v15 — Gemini 3.1 Flash Image Preview
+======================================================
+- Single call for everything, no chaining
+- Ref images resolved from project root
 """
 
-import os, time, base64
+import os, time
 from io import BytesIO
 from pathlib import Path
 from PIL import Image
-from openai import AsyncOpenAI
 from dotenv import load_dotenv
+from google import genai
+from google.genai import types
 
 load_dotenv()
 
-client      = AsyncOpenAI(api_key=os.getenv("OPENAI_API_KEY"))
-RESULTS_DIR = Path(os.getenv("RESULTS_DIR", "./results"))
+_client      = genai.Client(api_key=os.getenv("GEMINI_API_KEY"))
+GEMINI_MODEL = "gemini-3.1-flash-image-preview"
+RESULTS_DIR  = Path(os.getenv("RESULTS_DIR", "./results"))
+PROJECT_ROOT = Path(os.getenv("PROJECT_ROOT", os.getcwd()))
 RESULTS_DIR.mkdir(exist_ok=True)
+
+
+def _image_part(path: str) -> types.Part:
+    img = Image.open(path).convert("RGB")
+    buf = BytesIO()
+    img.save(buf, format="JPEG", quality=92)
+    return types.Part.from_bytes(data=buf.getvalue(), mime_type="image/jpeg")
+
+
+def _save_result(img_bytes: bytes, result_path: Path):
+    Image.open(BytesIO(img_bytes)).convert("RGB").save(str(result_path), format="PNG")
+
+
+def _resolve_refs(reference_paths: list[str]) -> list[str]:
+    resolved = []
+    for r in (reference_paths or []):
+        full = PROJECT_ROOT / r
+        if full.exists():
+            resolved.append(str(full))
+    return resolved
+
+
+async def _call(image_path: str, prompt: str, reference_paths: list[str] = None) -> tuple[bytes, int]:
+    refs = _resolve_refs(reference_paths)
+
+    contents = [_image_part(image_path)]
+    if refs:
+        for ref in refs[:3]:
+            contents.append(_image_part(ref))
+        prompt = prompt + " Use the reference image(s) only to match the exact color and finish."
+    contents.append(prompt)
+
+    response = _client.models.generate_content(
+        model    = GEMINI_MODEL,
+        contents = contents,
+        config   = types.GenerateContentConfig(
+            response_modalities = ["IMAGE"],
+            temperature         = 0.0,
+        ),
+    )
+
+    if not response.candidates:
+        raise RuntimeError(f"Gemini blocked the request. Feedback: {response.prompt_feedback}")
+
+    for part in response.candidates[0].content.parts:
+        if part.inline_data and part.inline_data.mime_type.startswith("image/"):
+            return part.inline_data.data, len(refs)
+
+    raise RuntimeError(f"Gemini returned no image. Finish reason: {response.candidates[0].finish_reason}")
 
 
 async def generate_with_image_edit(
@@ -26,53 +78,33 @@ async def generate_with_image_edit(
     category_slug: str = None,
     reference_paths: list[str] = None,
 ) -> dict:
-    start = time.time()
-
-    refs = [r for r in (reference_paths or []) if os.path.exists(r)]
-
-    if refs:
-        # Multiple images: face photo first, then references
-        images = []
-        for path in [user_photo_path] + refs[:3]:
-            images.append(open(path, "rb"))
-
-        ref_instruction = (
-            f"The last {len(refs)} image(s) are reference swatches showing the exact "
-            f"color, finish, and intensity of the makeup product. "
-            f"Match them precisely when applying to the first image (the face photo). "
-        )
-        full_prompt = ref_instruction + prompt
-
-        try:
-            response = await client.images.edit(
-                model  = "gpt-image-1",
-                image  = images,
-                prompt = full_prompt,
-                n      = 1,
-                size   = "1024x1024",
-            )
-        finally:
-            for f in images:
-                f.close()
-    else:
-        # No references — single image
-        with open(user_photo_path, "rb") as f:
-            response = await client.images.edit(
-                model  = "gpt-image-1",
-                image  = f,
-                prompt = prompt,
-                n      = 1,
-                size   = "1024x1024",
-            )
-
-    img_bytes   = base64.b64decode(response.data[0].b64_json)
-    result_path = RESULTS_DIR / f"{job_id}.png"
-    Image.open(BytesIO(img_bytes)).save(str(result_path), format="PNG")
+    start               = time.time()
+    img_bytes, refs_used = await _call(user_photo_path, prompt, reference_paths)
+    result_path         = RESULTS_DIR / f"{job_id}.png"
+    _save_result(img_bytes, result_path)
 
     return {
         "result_path":     str(result_path),
         "generation_time": round(time.time() - start, 2),
-        "cached":          False,
-        "mask_used":       False,
-        "references_used": len(refs),
+        "references_used": refs_used,
+    }
+
+
+async def generate_combo(
+    user_photo_path: str,
+    steps: list[dict],
+    job_id: str,
+) -> dict:
+    start               = time.time()
+    prompt              = steps[0].get("combined_prompt") or steps[0]["prompt"]
+    refs                = steps[0].get("reference_paths", [])
+    img_bytes, refs_used = await _call(user_photo_path, prompt, refs)
+    result_path         = RESULTS_DIR / f"{job_id}.png"
+    _save_result(img_bytes, result_path)
+
+    return {
+        "result_path":     str(result_path),
+        "generation_time": round(time.time() - start, 2),
+        "references_used": refs_used,
+        "calls_made":      1,
     }

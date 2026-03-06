@@ -1,0 +1,59 @@
+You're right, sorry. That was the original handoff from a previous session. Here's the corrected one for today's work:
+
+---
+
+**GlamAI — Handoff Prompt (March 6 2026)**
+
+**Tech stack:**
+- FastAPI + SQLAlchemy async + SQLite
+- Gemini `gemini-3.1-flash-image-preview` via `google-genai` SDK
+- Python 3.11
+
+**Generation pipeline — COMPLETE ✅**
+- `engine/generator.py` — Gemini 3.1 Flash Image Preview, single call, no chaining, `temperature: 0.0` for consistency
+- `engine/prompt_engine.py` — minimal natural prompts, no hex colors, no skin tone, no numbered lists. Formula: `"put the {brand} {shade} {product} on this girl."`
+- `db/models.py` — Brand, Category, Product, Shade, ReferenceImage, GenerationJob
+- `brands/seed_references.py` — reference image seeder, scans `references/{brand}/{product}/{shade}/`
+- All REST endpoints working: `/upload`, `/generate`, `/generate-combo`, `/jobs/{id}`, `/brands`, `/products`, `/shades`
+- Reference images: swatch only (clean color on white background), paths resolved from project root, `references_used` in response
+- Combo: same zone only, sorted by application order, single Gemini call, natural joined prompt
+- Cost per generation: ~$0.067
+
+**Key decisions made:**
+- Removed "You are a pro makeup artist" — caused hand/brush hallucination
+- `temperature: 0.0` — fixes color inconsistency
+- No chaining — single call for everything including combo
+- Swatch ref images only — no model/on_skin refs (confuses Gemini)
+- No hex color in prompt — refs handle color accuracy
+
+**Reference images folder structure:**
+```
+references/{brand-slug}/{product-slug}/{shade-slug}/swatch.jpg
+```
+
+---
+
+**NEXT TO BUILD:**
+
+**1. Generation Gates** *(run before generation)*
+- Gate 1: Face validation — detect face exists, front-facing, not blurry
+- Gate 2: Makeup detection — reject if user already wearing makeup
+- Gate 3: Skin tone detection — classify fair/light/medium/tan/deep/rich
+
+**3. AWS Infrastructure**
+- EC2/ECS for FastAPI, RDS PostgreSQL, S3 for uploads/results/refs, CloudFront CDN, SQS queue, Secrets Manager
+
+**4. Job Queue system**
+- Currently synchronous (~20-25s)
+- Need async: submit → get `job_id` → poll `/jobs/{job_id}`
+- SQS + worker OR Redis + Celery
+
+---
+
+**Pricing model:**
+- 3 free credits on signup
+- $4/month — 30 credits
+- $10/month — 100 credits
+- Cost per generation ~$0.067, margin acceptable at scale
+
+**Start with Gates then Multi-category then AWS.**

@@ -34,14 +34,14 @@ NYX_PRODUCTS = [
         "name": "Matte Lipstick",
         "slug": "nyx-matte-lipstick",
         "shades": [
-            {"name": "Siren",         "hex": "#8B1A1A", "finish": "matte", "coverage": "full", "description": "very dark deep burgundy red, almost vampy, full opaque matte"},
+            {"name": "Siren",         "hex": "#8B1A1A", "finish": "matte", "coverage": "full", "description": ""},
             {"name": "Alabama",       "hex": "#C45A65", "finish": "matte", "coverage": "full", "description": ""},
-            {"name": "Whipped Caviar","hex": "#2C1A1A", "finish": "matte", "coverage": "full", "description": "extremely dark near-black brown, very deep and moody"},
+            {"name": "Whipped Caviar","hex": "#2C1A1A", "finish": "matte", "coverage": "full", "description": ""},
             {"name": "Nude Pink",     "hex": "#D4977A", "finish": "matte", "coverage": "full", "description": ""},
             {"name": "Indie Flick",   "hex": "#A0522D", "finish": "matte", "coverage": "full", "description": ""},
-            {"name": "Strawberry Milk","hex": "#F4A7A7","finish": "matte", "coverage": "full", "description": "very sheer soft pink, barely-there tint, milky finish"},
+            {"name": "Strawberry Milk","hex": "#F4A7A7","finish": "matte", "coverage": "full", "description": ""},
             {"name": "Chic Red",      "hex": "#C0392B", "finish": "matte", "coverage": "full", "description": ""},
-            {"name": "Cocoa",         "hex": "#5C3317", "finish": "matte", "coverage": "full", "description": "deep warm chocolate brown, rich and earthy"},
+            {"name": "Cocoa",         "hex": "#5C3317", "finish": "matte", "coverage": "full", "description": ""},
         ]
     },
 

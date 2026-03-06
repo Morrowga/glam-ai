@@ -5,10 +5,10 @@ from sqlalchemy import select
 from pydantic import BaseModel
 from db.models import init_db, get_db, Brand, Category, Product, Shade, GenerationJob, ReferenceImage
 from engine.prompt_engine import build_prompt, build_combined_prompt, sort_shade_ids_by_zone_order, CATEGORY_ZONE
-from engine.generator import generate_with_image_edit
+from engine.generator import generate_with_image_edit, generate_combo
 from contextlib import asynccontextmanager
 from datetime import datetime
-import shutil, uuid, os
+import shutil, uuid
 from pathlib import Path
 
 UPLOAD_DIR = Path("./uploads")
@@ -75,7 +75,7 @@ async def upload_photo(file: UploadFile = File(...)):
     return {"upload_path": str(save_path.resolve()), "file_id": file_id}
 
 
-# ── SINGLE GENERATION — unchanged ────────────────────────────────
+# ── SINGLE GENERATION ─────────────────────────────────────────────
 
 class GenerateRequest(BaseModel):
     shade_id:           str
@@ -100,24 +100,18 @@ async def generate(req: GenerateRequest, db: AsyncSession = Depends(get_db)):
 
     refs_result = await db.execute(
         select(ReferenceImage)
-        .where(ReferenceImage.shade_id == shade.id)
-        .order_by(ReferenceImage.source)
-        .limit(3)
+        .where(ReferenceImage.shade_id == shade.id, ReferenceImage.source == "swatch")
+        .limit(1)
     )
     reference_paths = [r.image_path for r in refs_result.scalars().all()]
 
     prompt = build_prompt(
         category_slug=category.slug,
         product_data={
-            "category_slug":     category.slug,
-            "brand_name":        brand.name,
-            "brand_slug":        brand.slug,
-            "product_name":      product.name,
-            "shade_name":        shade.name,
-            "hex_color":         shade.hex_color or "#000000",
-            "finish_type":       shade.finish_type or "satin",
-            "coverage":          shade.coverage or "medium",
-            "prompt_supplement": shade.prompt_supplement or "",
+            "category_slug": category.slug,
+            "brand_name":    brand.name,
+            "product_name":  product.name,
+            "shade_name":    shade.name,
         },
         detected_skin_tone=req.detected_skin_tone,
     )
@@ -186,18 +180,16 @@ async def get_job(job_id: str, db: AsyncSession = Depends(get_db)):
     }
 
 
-# ═════════════════════════════════════════════════════════════════════════════
-# COMBO GENERATION — single API call, one output image
-# ═════════════════════════════════════════════════════════════════════════════
+# ── COMBO GENERATION ──────────────────────────────────────────────
 
 class GenerateComboRequest(BaseModel):
-    shade_ids:          list[str]   # 2–4 shade IDs, must be same zone
+    shade_ids:          list[str]
     upload_path:        str
     detected_skin_tone: str = "medium"
 
 
 @app.post("/generate-combo")
-async def generate_combo(req: GenerateComboRequest, db: AsyncSession = Depends(get_db)):
+async def generate_combo_endpoint(req: GenerateComboRequest, db: AsyncSession = Depends(get_db)):
 
     if len(req.shade_ids) < 2:
         raise HTTPException(400, "Use /generate for a single shade. /generate-combo requires 2+ shades.")
@@ -228,49 +220,41 @@ async def generate_combo(req: GenerateComboRequest, db: AsyncSession = Depends(g
     category_slugs = [row[3].slug for row in shade_rows]
     ordered_slugs  = sort_shade_ids_by_zone_order(category_slugs)
     slug_to_row    = {row[3].slug: row for row in shade_rows}
-    ordered_rows   = [slug_to_row[slug] for slug in ordered_slugs]
+    ordered_rows   = [slug_to_row[slug] for slug in ordered_slugs if slug in slug_to_row]
 
-    # ── 4. Collect reference images (merge all shades, up to 3 total) ──
+    if not ordered_rows:
+        raise HTTPException(400, "Could not order shades — check category slugs.")
+
+    # ── 4. Collect ref images (1 per shade, max 3 total) ─────────
     all_reference_paths = []
     for shade, product, brand, category in ordered_rows:
         if len(all_reference_paths) >= 3:
             break
         refs_result = await db.execute(
             select(ReferenceImage)
-            .where(ReferenceImage.shade_id == shade.id)
-            .order_by(ReferenceImage.source)
-            .limit(1)   # 1 ref per shade max so we don't exceed 3 total
+            .where(ReferenceImage.shade_id == shade.id, ReferenceImage.source == "swatch")
+            .limit(1)
         )
-        refs = refs_result.scalars().all()
-        all_reference_paths.extend([r.image_path for r in refs])
+        all_reference_paths.extend([r.image_path for r in refs_result.scalars().all()])
 
-    # ── 5. Build ONE combined prompt ──────────────────────────────
-    steps = [
-        {
+    # ── 5. Build combined prompt ──────────────────────────────────
+    prompt_steps = []
+    for shade, product, brand, category in ordered_rows:
+        prompt_steps.append({
             "category_slug": category.slug,
-            "product_data": {
-                "category_slug":     category.slug,
-                "brand_name":        brand.name,
-                "brand_slug":        brand.slug,
-                "product_name":      product.name,
-                "shade_name":        shade.name,
-                "hex_color":         shade.hex_color or "#000000",
-                "finish_type":       shade.finish_type or "satin",
-                "coverage":          shade.coverage or "medium",
-                "prompt_supplement": shade.prompt_supplement or "",
-            }
-        }
-        for shade, product, brand, category in ordered_rows
-    ]
+            "product_data":  {
+                "brand_name":  brand.name,
+                "shade_name":  shade.name,
+            },
+        })
 
-    prompt = build_combined_prompt(
-        steps              = steps,
+    combined_prompt = build_combined_prompt(
+        steps              = prompt_steps,
         detected_skin_tone = req.detected_skin_tone,
     )
 
-    # ── 6. Single GenerationJob for the combo ─────────────────────
-    session_id = str(uuid.uuid4())
-    # Store first shade_id as primary (combo job)
+    # ── 6. Create job ─────────────────────────────────────────────
+    session_id    = str(uuid.uuid4())
     primary_shade = ordered_rows[0][0]
 
     job = GenerationJob(
@@ -279,21 +263,19 @@ async def generate_combo(req: GenerateComboRequest, db: AsyncSession = Depends(g
         shade_id    = primary_shade.id,
         upload_path = req.upload_path,
         input_path  = req.upload_path,
-        prompt_used = prompt,
+        prompt_used = combined_prompt,
         status      = "processing",
     )
     db.add(job)
     await db.commit()
     await db.refresh(job)
 
-    # ── 7. Single API call ────────────────────────────────────────
+    # ── 7. Single call with refs ──────────────────────────────────
     try:
-        result = await generate_with_image_edit(
+        result = await generate_combo(
             user_photo_path = req.upload_path,
-            prompt          = prompt,
+            steps           = [{"combined_prompt": combined_prompt, "reference_paths": all_reference_paths}],
             job_id          = job.id,
-            category_slug   = "combo",
-            reference_paths = all_reference_paths,
         )
         job.result_path     = result["result_path"]
         job.status          = "complete"
@@ -313,11 +295,13 @@ async def generate_combo(req: GenerateComboRequest, db: AsyncSession = Depends(g
         "session_id":      session_id,
         "zone":            list(zones)[0],
         "result_path":     job.result_path,
-    "generation_time": job.generation_time,
+        "generation_time": job.generation_time,
         "references_used": result.get("references_used", 0),
+        "reference_paths": all_reference_paths,
+        "calls_made":      result.get("calls_made", 1),
+        "prompt_used":     combined_prompt,
         "shades_applied":  [
             {"category": cat.slug, "shade": shade.name, "product": product.name}
             for shade, product, brand, cat in ordered_rows
         ],
-        "prompt_used":     prompt,
     }
