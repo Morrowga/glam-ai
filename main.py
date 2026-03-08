@@ -1,13 +1,13 @@
 from fastapi import FastAPI, Depends, HTTPException, UploadFile, File
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.staticfiles import StaticFiles
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select
 from pydantic import BaseModel
 from db.models import init_db, get_db, Brand, Category, Product, Shade, GenerationJob, ReferenceImage
 from engine.prompt_engine import build_prompt, build_combined_prompt, sort_shade_ids_by_zone_order, CATEGORY_ZONE
-from engine.generator import generate_with_image_edit, generate_combo
+from engine.face_validator import validate_photo
 from contextlib import asynccontextmanager
-from datetime import datetime
 import shutil, uuid
 from pathlib import Path
 
@@ -22,6 +22,7 @@ async def lifespan(app: FastAPI):
 
 app = FastAPI(title="GlamAI API", lifespan=lifespan)
 app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_methods=["*"], allow_headers=["*"])
+app.mount("/results", StaticFiles(directory="results"), name="results")
 
 
 # ── BRANDS ────────────────────────────────────────────────────────
@@ -67,12 +68,33 @@ async def get_shades(product_id: str, db: AsyncSession = Depends(get_db)):
 
 @app.post("/upload")
 async def upload_photo(file: UploadFile = File(...)):
-    file_id = str(uuid.uuid4())[:8]
-    ext = file.filename.split(".")[-1]
+    # Save file first
+    file_id   = str(uuid.uuid4())[:8]
+    ext       = file.filename.split(".")[-1]
     save_path = UPLOAD_DIR / f"{file_id}.{ext}"
+
     with open(save_path, "wb") as f:
         shutil.copyfileobj(file.file, f)
-    return {"upload_path": str(save_path.resolve()), "file_id": file_id}
+
+    # Validate photo
+    validation = await validate_photo(str(save_path.resolve()))
+
+    if not validation["pass"]:
+        # Delete rejected photo — no point keeping it
+        save_path.unlink(missing_ok=True)
+        raise HTTPException(
+            status_code=422,
+            detail={
+                "message":    validation["reject_reason"],
+                "validation": validation["details"],
+            }
+        )
+
+    return {
+        "upload_path": str(save_path.resolve()),
+        "file_id":     file_id,
+        "validation":  validation["details"],
+    }
 
 
 # ── SINGLE GENERATION ─────────────────────────────────────────────
@@ -87,8 +109,8 @@ class GenerateRequest(BaseModel):
 async def generate(req: GenerateRequest, db: AsyncSession = Depends(get_db)):
     row = await db.execute(
         select(Shade, Product, Brand, Category)
-        .join(Product, Shade.product_id == Product.id)
-        .join(Brand,   Product.brand_id == Brand.id)
+        .join(Product,  Shade.product_id    == Product.id)
+        .join(Brand,    Product.brand_id    == Brand.id)
         .join(Category, Product.category_id == Category.id)
         .where(Shade.id == req.shade_id)
     )
@@ -98,22 +120,15 @@ async def generate(req: GenerateRequest, db: AsyncSession = Depends(get_db)):
 
     shade, product, brand, category = row
 
-    refs_result = await db.execute(
-        select(ReferenceImage)
-        .where(ReferenceImage.shade_id == shade.id, ReferenceImage.source == "swatch")
-        .limit(1)
-    )
-    reference_paths = [r.image_path for r in refs_result.scalars().all()]
-
     prompt = build_prompt(
-        category_slug=category.slug,
-        product_data={
+        category_slug      = category.slug,
+        product_data       = {
             "category_slug": category.slug,
             "brand_name":    brand.name,
             "product_name":  product.name,
             "shade_name":    shade.name,
         },
-        detected_skin_tone=req.detected_skin_tone,
+        detected_skin_tone = req.detected_skin_tone,
     )
 
     job = GenerationJob(
@@ -123,43 +138,16 @@ async def generate(req: GenerateRequest, db: AsyncSession = Depends(get_db)):
         upload_path = req.upload_path,
         input_path  = req.upload_path,
         prompt_used = prompt,
-        status      = "processing",
+        status      = "pending",
     )
     db.add(job)
     await db.commit()
     await db.refresh(job)
 
-    try:
-        result = await generate_with_image_edit(
-            user_photo_path = req.upload_path,
-            prompt          = prompt,
-            job_id          = job.id,
-            category_slug   = category.slug,
-            reference_paths = reference_paths,
-        )
-        job.result_path     = result["result_path"]
-        job.status          = "complete"
-        job.generation_time = result["generation_time"]
-        job.completed_at    = datetime.utcnow()
-
-    except Exception as e:
-        job.status        = "failed"
-        job.error_message = str(e)
-        await db.commit()
-        raise HTTPException(500, f"Generation failed: {e}")
-
-    await db.commit()
-
     return {
-        "job_id":          job.id,
-        "result_path":     job.result_path,
-        "generation_time": job.generation_time,
-        "references_used": result.get("references_used", 0),
-        "category":        category.slug,
-        "shade":           shade.name,
-        "product":         product.name,
-        "brand":           brand.name,
-        "prompt_used":     prompt,
+        "job_id":  job.id,
+        "status":  "pending",
+        "message": "Job queued. Poll GET /jobs/{job_id} for result.",
     }
 
 
@@ -172,11 +160,14 @@ async def get_job(job_id: str, db: AsyncSession = Depends(get_db)):
     if not job:
         raise HTTPException(404, "Job not found")
     return {
-        "id":              job.id,
+        "job_id":          job.id,
         "status":          job.status,
-        "result_path":     job.result_path,
+        "result_path":     job.result_path if job.status == "complete" else None,
         "generation_time": job.generation_time,
-        "error":           job.error_message,
+        "error":           job.error_message if job.status == "failed" else None,
+        "session_id":      job.session_id,
+        "chain_order":     job.chain_order,
+        "completed_at":    job.completed_at,
     }
 
 
@@ -201,7 +192,7 @@ async def generate_combo_endpoint(req: GenerateComboRequest, db: AsyncSession = 
     for shade_id in req.shade_ids:
         row = await db.execute(
             select(Shade, Product, Brand, Category)
-            .join(Product,  Shade.product_id   == Product.id)
+            .join(Product,  Shade.product_id    == Product.id)
             .join(Brand,    Product.brand_id    == Brand.id)
             .join(Category, Product.category_id == Category.id)
             .where(Shade.id == shade_id)
@@ -216,7 +207,7 @@ async def generate_combo_endpoint(req: GenerateComboRequest, db: AsyncSession = 
     if len(zones) > 1:
         raise HTTPException(400, f"All shades must be in the same zone. Got: {zones}")
 
-    # ── 3. Sort by application order ─────────────────────────────
+    # ── 3. Sort by application order ──────────────────────────────
     category_slugs = [row[3].slug for row in shade_rows]
     ordered_slugs  = sort_shade_ids_by_zone_order(category_slugs)
     slug_to_row    = {row[3].slug: row for row in shade_rows}
@@ -225,26 +216,14 @@ async def generate_combo_endpoint(req: GenerateComboRequest, db: AsyncSession = 
     if not ordered_rows:
         raise HTTPException(400, "Could not order shades — check category slugs.")
 
-    # ── 4. Collect ref images (1 per shade, max 3 total) ─────────
-    all_reference_paths = []
-    for shade, product, brand, category in ordered_rows:
-        if len(all_reference_paths) >= 3:
-            break
-        refs_result = await db.execute(
-            select(ReferenceImage)
-            .where(ReferenceImage.shade_id == shade.id, ReferenceImage.source == "swatch")
-            .limit(1)
-        )
-        all_reference_paths.extend([r.image_path for r in refs_result.scalars().all()])
-
-    # ── 5. Build combined prompt ──────────────────────────────────
+    # ── 4. Build combined prompt ──────────────────────────────────
     prompt_steps = []
     for shade, product, brand, category in ordered_rows:
         prompt_steps.append({
             "category_slug": category.slug,
             "product_data":  {
-                "brand_name":  brand.name,
-                "shade_name":  shade.name,
+                "brand_name": brand.name,
+                "shade_name": shade.name,
             },
         })
 
@@ -253,7 +232,7 @@ async def generate_combo_endpoint(req: GenerateComboRequest, db: AsyncSession = 
         detected_skin_tone = req.detected_skin_tone,
     )
 
-    # ── 6. Create job ─────────────────────────────────────────────
+    # ── 5. Create job ─────────────────────────────────────────────
     session_id    = str(uuid.uuid4())
     primary_shade = ordered_rows[0][0]
 
@@ -264,43 +243,19 @@ async def generate_combo_endpoint(req: GenerateComboRequest, db: AsyncSession = 
         upload_path = req.upload_path,
         input_path  = req.upload_path,
         prompt_used = combined_prompt,
-        status      = "processing",
+        status      = "pending",
     )
     db.add(job)
     await db.commit()
     await db.refresh(job)
 
-    # ── 7. Single call with refs ──────────────────────────────────
-    try:
-        result = await generate_combo(
-            user_photo_path = req.upload_path,
-            steps           = [{"combined_prompt": combined_prompt, "reference_paths": all_reference_paths}],
-            job_id          = job.id,
-        )
-        job.result_path     = result["result_path"]
-        job.status          = "complete"
-        job.generation_time = result["generation_time"]
-        job.completed_at    = datetime.utcnow()
-
-    except Exception as e:
-        job.status        = "failed"
-        job.error_message = str(e)
-        await db.commit()
-        raise HTTPException(500, f"Combo generation failed: {e}")
-
-    await db.commit()
-
     return {
-        "job_id":          job.id,
-        "session_id":      session_id,
-        "zone":            list(zones)[0],
-        "result_path":     job.result_path,
-        "generation_time": job.generation_time,
-        "references_used": result.get("references_used", 0),
-        "reference_paths": all_reference_paths,
-        "calls_made":      result.get("calls_made", 1),
-        "prompt_used":     combined_prompt,
-        "shades_applied":  [
+        "job_id":         job.id,
+        "status":         "pending",
+        "message":        "Job queued. Poll GET /jobs/{job_id} for result.",
+        "zone":           list(zones)[0],
+        "session_id":     session_id,
+        "shades_applied": [
             {"category": cat.slug, "shade": shade.name, "product": product.name}
             for shade, product, brand, cat in ordered_rows
         ],

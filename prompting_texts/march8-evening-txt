@@ -8,12 +8,27 @@
 - FastAPI + SQLAlchemy async + SQLite stack set up
 - All DB models defined (`Brand`, `Category`, `Product`, `Shade`, `ReferenceImage`, `Job`)
 - `.env` structure finalized (Gemini key, SMTP, storage dirs)
+- Result images served via `app.mount("/results", StaticFiles(directory="results"))`
 
 ### Generation Pipeline
 - `generator.py` (v17) — retry x2, admin email alert on failure, clean 503 to user, `model_used` in response
 - `prompt_engine.py` (v13) — zone-aware layering, skin-tone aware contour prompt, mascara improved, cheek prompts improved
-- `main.py` — `/generate` + `/generate-combo` with 503 handling, credit not deducted on failure
+- `main.py` (updated) — queue-based, `/generate` + `/generate-combo` return `job_id` instantly, no longer calls Gemini directly
+- `worker.py` — polls DB every 3 seconds, picks up `pending` jobs, calls Gemini, updates status to `complete` or `failed`
+- `GET /jobs/{job_id}` — client polls this for status: `pending → processing → complete → failed`
 - Combo blocked for cheeks zone — single product only
+- Dockerfile + .dockerignore written, ready for Fargate migration when needed
+
+### API Flow (UI Integration Ready)
+```
+POST /upload          → get upload_path
+GET /brands           → brand list
+GET /brands/{brand}/categories → categories
+GET /brands/{brand}/{category}/products → products
+GET /products/{id}/shades → shades
+POST /generate        → get job_id instantly
+GET /jobs/{job_id}    → poll every 3s until complete
+```
 
 ### Prompt Status Per Category
 | Category | Status | Notes |
@@ -66,11 +81,10 @@
 - Contour — invisible on deep skin without tone-aware prompt
 
 ### Infrastructure
-- **Job queue** — async flow: `POST /generate` → returns `job_id` → client polls `GET /jobs/{job_id}`
-- **Before/after slider** — frontend feature, required before contour re-enable
-- **AWS migration** — EC2/ECS, RDS PostgreSQL (replace SQLite), S3 (replace local storage), CloudFront, SQS
+- **AWS migration** — EC2 (running now), RDS PostgreSQL (replace SQLite), S3 (replace local storage), CloudFront, Route 53, SES, Secrets Manager, CloudWatch
 - **Credit tracking** — track `credits_used` per user per billing cycle to monitor real utilization
 - **Subscription system** — Stripe integration, tier enforcement, credit reset monthly
+- **Before/after slider** — frontend feature, required before contour re-enable
 
 ### Testing
 - Blush — not tested with new prompt yet
@@ -94,4 +108,4 @@
 
 ## 🔧 Carry Into Next Chat
 
-> "Continuing GlamAI backend. Stack: FastAPI + SQLAlchemy async + SQLite, Gemini `gemini-2.0-flash-image-preview`. Files done: `generator.py` v17, `prompt_engine.py` v13, `main.py`, `seeds/seed_general.py`, `seeds/brands/seed_nyx.py`. Pricing: Tier 1 $4.99/50 credits, Tier 2 $9.99/120 credits. Next task: **[pick one from unfinished above]**."
+> "Continuing GlamAI backend. Stack: FastAPI + SQLAlchemy async + SQLite, Gemini `gemini-2.0-flash-image-preview`. Files done: `generator.py` v17, `prompt_engine.py` v13, `main.py` (queue-based), `worker.py`, `seeds/seed_general.py`, `seeds/brands/seed_nyx.py`, `Dockerfile`, `.dockerignore`. Pricing: Tier 1 $4.99/50 credits, Tier 2 $9.99/120 credits. Next task: **[pick one from unfinished above]**."

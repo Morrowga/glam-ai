@@ -9,3 +9,15 @@ python-dotenv==1.0.1
 pydantic==2.7.1
 requests==2.31.0
 rich==13.7.1
+
+# Gemini
+google-generativeai==0.8.6
+googleapis-common-protos==1.73.0
+grpcio==1.78.0
+grpcio-status==1.62.3
+proto-plus==1.27.1
+protobuf==4.25.3
+
+# Face validation
+mediapipe==0.10.14
+opencv-python==4.13.0.92
