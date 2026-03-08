@@ -1,0 +1,58 @@
+# GlamAI — Session Breakdown
+
+## ✅ Finished
+
+### Infrastructure
+- FastAPI + SQLAlchemy async + SQLite stack set up
+- All DB models defined (`Brand`, `Category`, `Product`, `Shade`, `ReferenceImage`, `Job`)
+- `.env` structure finalized (Gemini key, SMTP, storage dirs)
+
+### Generation Pipeline
+- `generator.py` (v17) — retry x2, admin email alert on failure, clean 503 to user, `model_used` in response
+- `prompt_engine.py` (v12) — zone-aware layering, correct connectors per zone, eyebrow tinting prompt fixed
+- `main.py` — `/generate` + `/generate-combo` with 503 handling, credit not deducted on failure
+
+### Seeding Structure
+- `seeds/seed_general.py` — master seeder, owns all 12 categories, calls brand seeders in order
+- `seeds/brands/nyx/seed_nyx.py` — NYX products + shades only, no categories, no mascara
+- `seeds/seed_references.py` — reference image seeder with `--brand` and `--product` flags
+- Seeding process documented in `COMMANDS.md`
+
+### Bugs Fixed
+- RGBA swatch → white RGB background before JPEG (Gemini 500 fix)
+- Wrong model name → `gemini-3.1-flash-image-preview`
+- 3-combo lip split → zone-aware connector `" Then layer on top, "`
+- Eyebrow block-painting → individual hair tinting prompt
+- Gemini 500 outages → retry x2 + clean 503
+
+### Docs
+- `COMMANDS.md` — fully updated with new stack, folder structure, seeding commands
+
+---
+
+## ❌ Unfinished
+
+### Gates (pre-generation validation)
+- **Face gate** — detect face exists, front-facing, not blurry
+- **Eye gate** — detect both eyes open before applying eye zone (except eyebrow)
+- **Makeup gate** — reject if user already wearing makeup
+- **Skin tone classifier** — classify uploaded photo as `fair / light / medium / tan / deep / rich` and pass to prompt
+
+### Infrastructure
+- **Job queue** — async flow: `POST /generate` → returns `job_id` → client polls `GET /jobs/{job_id}`
+- **AWS setup** — EC2/ECS, RDS PostgreSQL (replace SQLite), S3 (replace local storage), CloudFront, SQS for job queue
+
+### Testing
+- 3-combo generation with new layering fix (not tested yet)
+- Full end-to-end generate → result flow
+
+### Future Brands
+- MAC, Charlotte Tilbury, etc. — seeder templates ready, data not written
+
+---
+
+## 🔧 Carry Into Next Chat
+
+Paste this into your next session:
+
+> "Continuing GlamAI backend. Stack: FastAPI + SQLAlchemy async + SQLite, Gemini `gemini-3.1-flash-image-preview`. All files done: `generator.py` v17, `prompt_engine.py` v12, `main.py`, `seeds/seed_general.py`, `seeds/brands/nyx/seed_nyx.py`, `COMMANDS.md`. Next task: **[pick one from unfinished above]**."

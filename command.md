@@ -37,7 +37,7 @@ uvicorn[standard]
 sqlalchemy[asyncio]
 aiosqlite
 alembic
-openai>=2.24.0
+google-genai
 pillow
 opencv-python
 numpy
@@ -54,8 +54,8 @@ tenacity
 Create a `.env` file in the project root:
 
 ```env
-# OpenAI
-OPENAI_API_KEY=sk-...
+# Gemini
+GEMINI_API_KEY=...
 
 # Database
 DATABASE_URL=sqlite+aiosqlite:///./glamai.db
@@ -64,6 +64,13 @@ DATABASE_URL=sqlite+aiosqlite:///./glamai.db
 UPLOAD_DIR=./uploads
 RESULTS_DIR=./results
 REFERENCES_DIR=./references
+
+# Admin email alerts
+ADMIN_EMAIL=admin@yourdomain.com
+SMTP_HOST=smtp.gmail.com
+SMTP_PORT=587
+SMTP_USER=your@gmail.com
+SMTP_PASS=your_gmail_app_password
 ```
 
 ---
@@ -101,24 +108,49 @@ python -c "import asyncio; from db.models import init_db; asyncio.run(init_db())
 
 ## Seeding
 
-### NYX (full seed — all 13 categories)
+### First time — full seed
 ```bash
-python brands/nyx/seed_nyx.py
-```
-
-### Reference images — all brands
-```bash
-python brands/seed_references.py
+python seeds/seed_general.py     # seeds all categories + all brands
+python seeds/seed_references.py  # seeds all reference images
 ```
 
 ### Reference images — specific brand
 ```bash
-python brands/seed_references.py --brand nyx
+python seeds/seed_references.py --brand nyx
 ```
 
 ### Reference images — specific product
 ```bash
-python brands/seed_references.py --brand nyx --product nyx-matte-lipstick
+python seeds/seed_references.py --brand nyx --product nyx-matte-lipstick
+```
+
+---
+
+## Adding a New Brand
+
+```bash
+# 1. Create brand folder
+mkdir seeds/brands/{brand-slug}
+
+# 2. Copy NYX seeder as template
+cp seeds/brands/nyx/seed_nyx.py seeds/brands/{brand-slug}/seed_{brand}.py
+
+# 3. Edit seed_{brand}.py — update brand info, products, shades
+#    Do NOT add CATEGORIES — categories live in seed_general.py only
+
+# 4. Register in seed_general.py:
+#    from seeds.brands.{brand-slug}.seed_{brand} import seed as seed_{brand}
+#    then call: await seed_{brand}() inside seed_all()
+
+# 5. Run seeder
+python seeds/seed_general.py
+
+# 6. Add reference images
+mkdir -p references/{brand-slug}/{product-slug}/{shade-slug}
+# drop swatch.jpg files in there
+
+# 7. Seed references
+python seeds/seed_references.py --brand {brand-slug}
 ```
 
 ---
@@ -130,7 +162,7 @@ references/
   {brand-slug}/
     {product-slug}/
       {shade-slug}/
-        swatch.jpg       ← product color swatch
+        swatch.jpg       ← product color swatch (RGB JPEG, no transparency)
         on_skin.jpg      ← color swatch on skin/arm
         model.jpg        ← person wearing it
 ```
@@ -150,54 +182,32 @@ Add skin tone to filename — seeder auto-detects:
 
 ---
 
-## Adding a New Brand
-
-```bash
-# 1. Create brand folder
-mkdir brands/{brand-slug}
-
-# 2. Copy NYX seeder as template
-cp brands/nyx/seed_nyx.py brands/{brand-slug}/seed_{brand}.py
-
-# 3. Edit seed_{brand}.py — update brand info, products, shades
-
-# 4. Run seeder
-python brands/{brand-slug}/seed_{brand}.py
-
-# 5. Add reference images
-mkdir -p references/{brand-slug}/{product-slug}/{shade-slug}
-# drop your images in there
-
-# 6. Seed references
-python brands/seed_references.py --brand {brand-slug}
-```
-
----
-
 ## Project Folder Structure
 
 ```
 glamai/
-  main.py                      ← FastAPI app + all endpoints
+  main.py                          ← FastAPI app + all endpoints
   db/
-    models.py                  ← SQLAlchemy models
+    models.py                      ← SQLAlchemy models
   engine/
-    generator.py               ← image generation (gpt-image-1)
-    prompt_engine.py           ← prompt builder per category
-  brands/
-    seed_references.py         ← general reference image seeder
-    nyx/
-      seed_nyx.py              ← NYX seed data
-    mac/
-      seed_mac.py              ← (future)
-  references/                  ← reference images (local storage)
+    generator.py                   ← image generation (gemini-3.1-flash-image-preview)
+    prompt_engine.py               ← prompt builder per category + zone-aware layering
+  seeds/
+    __init__.py
+    seed_general.py                ← master seeder: categories + all brands
+    seed_references.py             ← reference image seeder
+    brands/
+      nyx/
+        seed_nyx.py                ← NYX products + shades
+      mac/
+        seed_mac.py                ← (future)
+  references/                      ← reference swatch images (local)
     nyx/
       nyx-matte-lipstick/
         siren/
-          model.jpg
-          on_skin.jpg
-  uploads/                     ← user uploaded photos
-  results/                     ← generated results
+          swatch.jpg
+  uploads/                         ← user uploaded photos
+  results/                         ← generated results
   .env
   requirements.txt
 ```
@@ -213,7 +223,8 @@ GET  /brands/{brand_slug}/{cat}/products  → products in category
 GET  /products/{product_id}/shades        → shades for product
 
 POST /upload                              → upload user photo
-POST /generate                            → generate makeup try-on
+POST /generate                            → single product try-on
+POST /generate-combo                      → multi-product combo try-on
 GET  /jobs/{job_id}                       → check job status
 ```
 
@@ -222,19 +233,20 @@ GET  /jobs/{job_id}                       → check job status
 ## Useful Dev Commands
 
 ```bash
-# Check OpenAI SDK version
-python -c "import openai; print(openai.__version__)"
+# Check google-genai SDK version
+python -c "import google.genai; print(google.genai.__version__)"
 
 # Check installed packages
 pip list
 
-# Upgrade OpenAI SDK
-pip install --upgrade openai
+# Upgrade google-genai SDK
+pip install --upgrade google-genai
 
 # Check DB contents (SQLite)
 sqlite3 glamai.db ".tables"
 sqlite3 glamai.db "SELECT name, hex_color, prompt_supplement FROM shades LIMIT 10;"
 sqlite3 glamai.db "SELECT COUNT(*) FROM reference_images;"
+sqlite3 glamai.db "SELECT name, slug FROM categories;"
 
 # Freeze requirements
 pip freeze > requirements.txt
