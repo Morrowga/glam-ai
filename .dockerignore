@@ -1,0 +1,29 @@
+# Environment
+.env
+.env.*
+
+# Python
+__pycache__
+*.pyc
+*.pyo
+*.pyd
+.Python
+
+# Local storage (use S3 in production)
+uploads/
+results/
+
+# Database (use RDS in production)
+*.db
+*.sqlite
+*.sqlite3
+
+# Git
+.git
+.gitignore
+
+# Logs
+*.log
+
+# OS
+.DS_Store

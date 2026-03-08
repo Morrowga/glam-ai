@@ -1,0 +1,97 @@
+# GlamAI — Session Breakdown
+
+---
+
+## ✅ Finished
+
+### Infrastructure
+- FastAPI + SQLAlchemy async + SQLite stack set up
+- All DB models defined (`Brand`, `Category`, `Product`, `Shade`, `ReferenceImage`, `Job`)
+- `.env` structure finalized (Gemini key, SMTP, storage dirs)
+
+### Generation Pipeline
+- `generator.py` (v17) — retry x2, admin email alert on failure, clean 503 to user, `model_used` in response
+- `prompt_engine.py` (v13) — zone-aware layering, skin-tone aware contour prompt, mascara improved, cheek prompts improved
+- `main.py` — `/generate` + `/generate-combo` with 503 handling, credit not deducted on failure
+- Combo blocked for cheeks zone — single product only
+
+### Prompt Status Per Category
+| Category | Status | Notes |
+|----------|--------|-------|
+| Lipstick | ✅ | |
+| Lip Gloss | ✅ | |
+| Lip Liner | ✅ | |
+| Eyeshadow | ✅ | |
+| Eyeliner | ✅ | |
+| Mascara | ✅ | Tested, excellent result |
+| Eyebrow | ✅ | |
+| Blush | ✅ | Improved prompt |
+| Bronzer | ✅ | Improved prompt |
+| Highlighter | ✅ | Improved prompt |
+| Foundation | ⛔ | Disabled — needs skin tone classifier |
+| Concealer | ⛔ | Disabled — needs skin tone classifier |
+| Contour | ⛔ | Disabled — too subtle on deep skin, needs classifier + before/after slider |
+
+### Seeding
+- `seeds/seed_general.py` — master seeder, owns all active categories
+- `seeds/brands/seed_nyx.py` — NYX products + shades, fixed CATEGORIES bug, added mascara product (On The Rise Liftscara)
+- Contour, foundation, concealer commented out in both seed files
+
+### Bugs Fixed
+- RGBA swatch → white RGB background before JPEG (Gemini 500 fix)
+- Wrong model name → `gemini-2.0-flash-image-preview`
+- 3-combo lip split → zone-aware connector `" Then layer on top, "`
+- Eyebrow block-painting → individual hair tinting prompt
+- Gemini 500 outages → retry x2 + clean 503
+- `CATEGORIES` not defined in `seed_nyx.py` → now fetches from DB
+
+### Business
+- Pricing finalized — 2 tier model
+- Gemini cost calculated at $0.068 per generation (1K image output)
+- Unit economics confirmed healthy at 60% credit utilization
+
+---
+
+## ❌ Unfinished
+
+### Gates (pre-generation validation)
+- **Face gate** — detect face exists, front-facing, not blurry
+- **Eye gate** — detect both eyes open before applying eye zone (except eyebrow)
+- **Makeup gate** — reject if user already wearing makeup
+- **Skin tone classifier** — classify uploaded photo as `fair / light / medium / tan / deep / rich` and pass to prompt engine — **blocks foundation, concealer, contour re-enable**
+
+### Products to Re-enable After Classifier
+- Foundation — shade matching depends on skin tone
+- Concealer — wrong shade looks worse than nothing
+- Contour — invisible on deep skin without tone-aware prompt
+
+### Infrastructure
+- **Job queue** — async flow: `POST /generate` → returns `job_id` → client polls `GET /jobs/{job_id}`
+- **Before/after slider** — frontend feature, required before contour re-enable
+- **AWS migration** — EC2/ECS, RDS PostgreSQL (replace SQLite), S3 (replace local storage), CloudFront, SQS
+- **Credit tracking** — track `credits_used` per user per billing cycle to monitor real utilization
+- **Subscription system** — Stripe integration, tier enforcement, credit reset monthly
+
+### Testing
+- Blush — not tested with new prompt yet
+- Bronzer — not tested with new prompt yet
+- Highlighter — not tested yet
+- Full end-to-end generate → result → credit deduction flow
+
+### Future Brands
+- MAC, Charlotte Tilbury, etc. — seeder templates ready, data not written
+
+---
+
+## 💰 Pricing
+
+| | Tier 1 — Basic | Tier 2 — Glam |
+|--|--|--|
+| **Price/month** | $4.99 | $9.99 |
+| **Credits/month** | 50 | 120 |
+
+---
+
+## 🔧 Carry Into Next Chat
+
+> "Continuing GlamAI backend. Stack: FastAPI + SQLAlchemy async + SQLite, Gemini `gemini-2.0-flash-image-preview`. Files done: `generator.py` v17, `prompt_engine.py` v13, `main.py`, `seeds/seed_general.py`, `seeds/brands/seed_nyx.py`. Pricing: Tier 1 $4.99/50 credits, Tier 2 $9.99/120 credits. Next task: **[pick one from unfinished above]**."
