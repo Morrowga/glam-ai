@@ -1,0 +1,140 @@
+Based on your `useTryOn` hook and `tryOnSlice`, here's the exact API flow:
+
+---
+
+**Step 1 — Upload photo**
+
+Your `handleImageUpload` currently uses `URL.createObjectURL` (local only). For real API you send:
+
+```
+POST /upload
+Content-Type: multipart/form-data
+
+file: <binary image file>
+```
+
+Response you need:
+```json
+{
+  "upload_path": "uploads/abc123/photo_1741234567.jpg"
+}
+```
+
+Store this in `uploadedImagePath` via `setUploadedImage({ url: localUrl, path: data.upload_path })`.
+
+---
+
+**Step 2 — Generate**
+
+Your `handleGenerate` builds this from Redux state:
+
+```json
+POST /generate
+{
+  "upload_path": "uploads/abc123/photo_1741234567.jpg",
+  "zone": "lip",
+  "items": [
+    { "productId": "mac-ls-1", "shadeId": "sh-mac-ls1-1" },
+    { "productId": "mac-lg-1", "shadeId": "sh-mac-lg1-1" }
+  ]
+}
+```
+
+`zone` = `state.selectedZone`, `items` = `state.cart`, `upload_path` = `state.uploadedImagePath`.
+
+Response:
+```json
+{
+  "job_id": "job_xyz789"
+}
+```
+
+Dispatch `startGeneration("job_xyz789")`.
+
+---
+
+**Step 3 — Poll job**
+
+Every 3 seconds call:
+```
+GET /jobs/job_xyz789
+```
+
+While processing:
+```json
+{ "status": "processing" }
+```
+
+On success:
+```json
+{
+  "status": "completed",
+  "result_url": "https://cdn.example.com/results/job_xyz789.jpg"
+}
+```
+
+Dispatch `generationSuccess(data.result_url)`.
+
+On failure:
+```json
+{
+  "status": "failed",
+  "error": "Face not detected"
+}
+```
+
+Dispatch `generationError(data.error)`.
+
+---
+
+**Updated `handleGenerate`** replacing the mock:
+
+```typescript
+const handleGenerate = useCallback(async () => {
+  if (!state.uploadedImagePath || state.cart.length === 0) return;
+
+  // Step 1 — submit job
+  const res = await fetch(`${API_BASE}/generate`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({
+      upload_path: state.uploadedImagePath,
+      zone: state.selectedZone,
+      items: state.cart,
+    }),
+  });
+  const { job_id } = await res.json();
+  dispatch(startGeneration(job_id));
+
+  // Step 2 — poll
+  const poll = setInterval(async () => {
+    const statusRes = await fetch(`${API_BASE}/jobs/${job_id}`);
+    const data = await statusRes.json();
+
+    if (data.status === 'completed') {
+      clearInterval(poll);
+      dispatch(generationSuccess(data.result_url));
+    } else if (data.status === 'failed') {
+      clearInterval(poll);
+      dispatch(generationError(data.error ?? 'Generation failed'));
+    }
+  }, 3000);
+
+}, [dispatch, state.uploadedImagePath, state.selectedZone, state.cart]);
+```
+
+---
+
+**Summary of what backend must return:**
+
+| Endpoint | Key fields |
+|---|---|
+| `POST /upload` | `upload_path` (string) |
+| `POST /generate` | `job_id` (string) |
+| `GET /jobs/:id` | `status` (`processing`/`completed`/`failed`), `result_url` (on completed), `error` (on failed) |
+| `GET /brands` | `id`, `name`, `logo` |
+| `GET /brands/:b/categories` | `id`, `name`, `zone` |
+| `GET /brands/:b/:cat/products` | `id`, `brandId`, `name`, `image`, `categoryId`, `zone` |
+| `GET /products/:id/shades` | `id`, `name`, `hex` (with `#`), `productId` |
+
+The only thing your backend needs to add that isn't in yesterday's doc is **`job_id`** must come back from `/generate` instantly — which it already does in your backend per the session notes.

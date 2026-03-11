@@ -21,3 +21,7 @@ protobuf==4.25.3
 # Face validation
 mediapipe==0.10.14
 opencv-python==4.13.0.92
+
+python-jose[cryptography]==3.3.0
+passlib[bcrypt]==1.7.4
+email-validator==2.1.1

@@ -1,0 +1,71 @@
+Here's the full updated breakdown:
+
+---
+
+## ✅ Finished
+
+### Backend — Auth Flow
+All models, utilities, dependencies, and endpoints tested and working.
+
+### Backend — Credits & Plans Flow
+All models, seeders, and payment endpoints done.
+
+### Frontend — Auth Flow
+- Redux store, RTK Query `authApi`, `baseApi` all wired
+- `LoginForm`, `RegisterForm`, verify-email page
+- Navbar with user info, credits badge, logout + cookie clear
+- `useSearchParams` auto-open login dialog after email verification
+
+### Frontend — Auth Gate (Dashboard)
+- `AuthGateDialogs.tsx` — Login Required + Out of Credits dialogs
+- `TryOnWeb` + `TryOnMobile` — Generate button intercepted for auth + credit check
+- Recent/History button hidden for guests
+- `HistorySidebar` only mounted when authenticated
+
+### Frontend — Middleware
+- `src/middleware.ts` protecting `/billing`, `/settings`, `/profile`
+- Cookie set on login, cleared on logout
+
+### Frontend — Billing Page
+- `app/billing/list/page.tsx` — active plan card + charge history with dummy data
+
+---
+
+## ❌ Unfinished
+
+### Backend
+
+| Area | Task |
+|---|---|
+| Generation | Add `user_id` to `GenerationJob` model |
+| Generation | Credit check before queuing `/generate` + `/generate-combo` |
+| Generation | Credit deduction in `worker.py` after successful job |
+| Generation | Apply `require_verified_user` to `/upload` and `/generate` |
+| Brands/Products | `logo` field missing on brand responses |
+| Brands/Products | `image` field missing on product responses |
+| Brands/Products | `hex_color` needs `#` prefix |
+| Brands/Products | Response needs `categoryId` and `zone` fields on products |
+| Generation Contract | Backend takes single `shade_id`, frontend sends `items: [{productId, shadeId}]` — needs adapter |
+| Generation Contract | `result_path` → needs to return full `result_url` instead |
+| History | No `/history` endpoint — needs original image, result image, date, shades/product/brand per job |
+| Payments | Stripe integration — deferred |
+| Payments | Country-based pricing — deferred |
+
+### Frontend
+
+| Area | Task |
+|---|---|
+| Catalog | Brands/products/shades API integration (currently using `MOCK_*` data) |
+| Generation | Wire real `/upload` + `/generate` + job polling to replace mock `handleGenerate` |
+| History | Wire real history endpoint to `HistorySidebar` (currently static) |
+| Billing | Replace dummy data with real `/payments/history` + `/payments/my-plan` |
+| Credits | Deduct credit from Redux state after successful generation (`deductCredit` action exists) |
+
+---
+
+**Suggested next order:**
+1. Add `user_id` to `GenerationJob` + protect `/upload` + `/generate` — unblocks everything else
+2. Fix brands/products response contract — unblocks catalog integration
+3. Build `/history` endpoint — unblocks history sidebar
+4. Wire frontend generation flow end to end
+5. Wire billing page to real data

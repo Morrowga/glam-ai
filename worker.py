@@ -6,6 +6,7 @@ from datetime import datetime
 from db.models import AsyncSessionLocal, GenerationJob, Shade, Product, Brand, Category, ReferenceImage
 from engine.generator import generate_with_image_edit
 from engine.prompt_engine import build_prompt
+from engine.credits import deduct_credit
 
 async def process_jobs():
     print("🔄 Worker started — polling every 3 seconds...")
@@ -64,6 +65,8 @@ async def process_jobs():
                         job.status          = "complete"
                         job.generation_time = result["generation_time"]
                         job.completed_at    = datetime.utcnow()
+                        if job.user_id:
+                            await deduct_credit(job.user_id, db)
                         print(f"✅ Job {job.id} complete")
 
                     except Exception as e:

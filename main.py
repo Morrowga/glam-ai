@@ -10,10 +10,13 @@ from engine.face_validator import validate_photo
 from contextlib import asynccontextmanager
 import shutil, uuid
 from pathlib import Path
+from routers.auth import router as auth_router
+from routers.payments import router as payments_router
 
 UPLOAD_DIR = Path("./uploads")
 UPLOAD_DIR.mkdir(exist_ok=True)
 Path("./results").mkdir(exist_ok=True)
+
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
@@ -21,9 +24,10 @@ async def lifespan(app: FastAPI):
     yield
 
 app = FastAPI(title="GlamAI API", lifespan=lifespan)
+app.include_router(auth_router, prefix="/auth", tags=["auth"])
 app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_methods=["*"], allow_headers=["*"])
 app.mount("/results", StaticFiles(directory="results"), name="results")
-
+app.include_router(payments_router, prefix="/payments", tags=["payments"])
 
 # ── BRANDS ────────────────────────────────────────────────────────
 
