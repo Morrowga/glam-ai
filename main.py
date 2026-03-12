@@ -1,78 +1,146 @@
-from fastapi import FastAPI, Depends, HTTPException, UploadFile, File
+from fastapi import FastAPI, Depends, HTTPException, UploadFile, File, Header
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select
+from sqlalchemy.orm import selectinload
 from pydantic import BaseModel
-from db.models import init_db, get_db, Brand, Category, Product, Shade, GenerationJob, ReferenceImage
+from db.models import init_db, get_db, Brand, Category, Product, Shade, GenerationJob, GenerationJobItem, ReferenceImage, User
 from engine.prompt_engine import build_prompt, build_combined_prompt, sort_shade_ids_by_zone_order, CATEGORY_ZONE
 from engine.face_validator import validate_photo
+from engine.auth_deps import get_current_user, verify_public_token
+from engine.credits import check_has_credits
 from contextlib import asynccontextmanager
-import shutil, uuid
+import shutil, uuid, os, asyncio
 from pathlib import Path
 from routers.auth import router as auth_router
 from routers.payments import router as payments_router
+from worker import process_jobs
+from shared_state import cancelled_jobs
 
 UPLOAD_DIR = Path("./uploads")
 UPLOAD_DIR.mkdir(exist_ok=True)
 Path("./results").mkdir(exist_ok=True)
+Path("./media/brands").mkdir(parents=True, exist_ok=True)
+Path("./media/products").mkdir(parents=True, exist_ok=True)
+
+BASE_URL = os.getenv("BASE_URL", "http://localhost:8087")
 
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     await init_db()
+    asyncio.create_task(process_jobs())
+    print("✅ Worker started")
     yield
 
 app = FastAPI(title="GlamAI API", lifespan=lifespan)
 app.include_router(auth_router, prefix="/auth", tags=["auth"])
 app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_methods=["*"], allow_headers=["*"])
 app.mount("/results", StaticFiles(directory="results"), name="results")
+app.mount("/uploads", StaticFiles(directory="uploads"), name="uploads")
+app.mount("/media",   StaticFiles(directory="media"),   name="media")
 app.include_router(payments_router, prefix="/payments", tags=["payments"])
+
+
+# ── ZONE HELPER ───────────────────────────────────────────────────
+
+def _strip_zone(zone: str) -> str:
+    """Convert DB zone 'lips/eyes/cheeks' → frontend 'lip/eye/cheek'"""
+    return zone.rstrip("s") if zone else zone
+
 
 # ── BRANDS ────────────────────────────────────────────────────────
 
 @app.get("/brands")
-async def get_brands(db: AsyncSession = Depends(get_db)):
+async def get_brands(db: AsyncSession = Depends(get_db), _: None = Depends(verify_public_token)):
     result = await db.execute(select(Brand).where(Brand.is_active == True))
     brands = result.scalars().all()
-    return [{"id": b.id, "name": b.name, "slug": b.slug, "tier": b.tier, "country": b.country} for b in brands]
+    return [
+        {
+            "id":      b.id,
+            "name":    b.name,
+            "slug":    b.slug,
+            "tier":    b.tier,
+            "country": b.country,
+            "logo":    f"{BASE_URL}/media/brands/{b.slug}.jpg",
+        }
+        for b in brands
+    ]
+
 
 @app.get("/brands/{brand_slug}/categories")
-async def get_brand_categories(brand_slug: str, db: AsyncSession = Depends(get_db)):
+async def get_brand_categories(brand_slug: str, db: AsyncSession = Depends(get_db), _: None = Depends(verify_public_token)):
     brand = await db.execute(select(Brand).where(Brand.slug == brand_slug))
     brand = brand.scalar_one_or_none()
     if not brand:
         raise HTTPException(404, "Brand not found")
+
     result = await db.execute(
         select(Category).join(Product).where(Product.brand_id == brand.id).distinct()
     )
     cats = result.scalars().all()
-    return [{"id": c.id, "name": c.name, "slug": c.slug, "zone": c.application_zone} for c in cats]
+    return [
+        {
+            "id":   c.id,
+            "name": c.name,
+            "slug": c.slug,
+            "zone": _strip_zone(c.application_zone),
+        }
+        for c in cats
+    ]
+
 
 @app.get("/brands/{brand_slug}/{category_slug}/products")
-async def get_products(brand_slug: str, category_slug: str, db: AsyncSession = Depends(get_db)):
+async def get_products(brand_slug: str, category_slug: str, db: AsyncSession = Depends(get_db), _: None = Depends(verify_public_token)):
     result = await db.execute(
-        select(Product)
-        .join(Brand).join(Category)
-        .where(Brand.slug == brand_slug, Category.slug == category_slug, Product.is_active == True)
+        select(Product, Brand, Category)
+        .join(Brand,    Product.brand_id    == Brand.id)
+        .join(Category, Product.category_id == Category.id)
+        .where(
+            Brand.slug    == brand_slug,
+            Category.slug == category_slug,
+            Product.is_active == True,
+        )
     )
-    products = result.scalars().all()
-    return [{"id": p.id, "name": p.name, "slug": p.slug} for p in products]
+    rows = result.all()
+    return [
+        {
+            "id":         p.id,
+            "name":       p.name,
+            "slug":       p.slug,
+            "brandId":    b.id,
+            "categoryId": c.id,
+            "zone":       _strip_zone(c.application_zone),
+            "image":      f"{BASE_URL}/media/products/{p.slug}.jpg",
+        }
+        for p, b, c in rows
+    ]
+
 
 @app.get("/products/{product_id}/shades")
-async def get_shades(product_id: str, db: AsyncSession = Depends(get_db)):
+async def get_shades(product_id: str, db: AsyncSession = Depends(get_db), _: None = Depends(verify_public_token)):
     result = await db.execute(
         select(Shade).where(Shade.product_id == product_id, Shade.is_active == True)
     )
     shades = result.scalars().all()
-    return [{"id": s.id, "name": s.name, "hex_color": s.hex_color, "finish_type": s.finish_type, "coverage": s.coverage} for s in shades]
+    return [
+        {
+            "id":        s.id,
+            "name":      s.name,
+            "hex":       s.hex_color,
+            "productId": s.product_id,
+            "finish":    s.finish_type,
+            "coverage":  s.coverage,
+        }
+        for s in shades
+    ]
 
 
 # ── UPLOAD ────────────────────────────────────────────────────────
 
 @app.post("/upload")
-async def upload_photo(file: UploadFile = File(...)):
-    # Save file first
+async def upload_photo(file: UploadFile = File(...), _: None = Depends(verify_public_token)):
     file_id   = str(uuid.uuid4())[:8]
     ext       = file.filename.split(".")[-1]
     save_path = UPLOAD_DIR / f"{file_id}.{ext}"
@@ -80,11 +148,9 @@ async def upload_photo(file: UploadFile = File(...)):
     with open(save_path, "wb") as f:
         shutil.copyfileobj(file.file, f)
 
-    # Validate photo
     validation = await validate_photo(str(save_path.resolve()))
 
     if not validation["pass"]:
-        # Delete rejected photo — no point keeping it
         save_path.unlink(missing_ok=True)
         raise HTTPException(
             status_code=422,
@@ -101,57 +167,147 @@ async def upload_photo(file: UploadFile = File(...)):
     }
 
 
-# ── SINGLE GENERATION ─────────────────────────────────────────────
+# ── UNIFIED GENERATE ──────────────────────────────────────────────
+
+class GenerateItem(BaseModel):
+    productId: str
+    shadeId:   str
 
 class GenerateRequest(BaseModel):
-    shade_id:           str
     upload_path:        str
+    zone:               str
+    items:              list[GenerateItem]
     detected_skin_tone: str = "medium"
 
 
 @app.post("/generate")
-async def generate(req: GenerateRequest, db: AsyncSession = Depends(get_db)):
-    row = await db.execute(
-        select(Shade, Product, Brand, Category)
-        .join(Product,  Shade.product_id    == Product.id)
-        .join(Brand,    Product.brand_id    == Brand.id)
-        .join(Category, Product.category_id == Category.id)
-        .where(Shade.id == req.shade_id)
-    )
-    row = row.first()
-    if not row:
-        raise HTTPException(404, "Shade not found")
+async def generate(
+    req:          GenerateRequest,
+    current_user: User           = Depends(get_current_user),
+    db:           AsyncSession   = Depends(get_db),
+):
+    # ── Auth: check credits before queuing ────────────────────────
+    has_credits = await check_has_credits(current_user.id, db)
+    if not has_credits:
+        raise HTTPException(
+            status_code=402,
+            detail="No credits available. Please top up to continue.",
+        )
 
-    shade, product, brand, category = row
+    # ── Validate upload file exists ───────────────────────────────
+    if not Path(req.upload_path).exists():
+        raise HTTPException(
+            status_code=422,
+            detail="Upload file not found. Please upload your photo first.",
+        )
 
-    prompt = build_prompt(
-        category_slug      = category.slug,
-        product_data       = {
-            "category_slug": category.slug,
-            "brand_name":    brand.name,
-            "product_name":  product.name,
-            "shade_name":    shade.name,
-        },
-        detected_skin_tone = req.detected_skin_tone,
-    )
+    if len(req.items) == 0:
+        raise HTTPException(400, "At least one item required.")
+    if len(req.items) > 4:
+        raise HTTPException(400, "Maximum 4 items per request.")
+
+    # ── Load all shades ───────────────────────────────────────────
+    shade_rows = []
+    for item in req.items:
+        row = await db.execute(
+            select(Shade, Product, Brand, Category)
+            .join(Product,  Shade.product_id    == Product.id)
+            .join(Brand,    Product.brand_id    == Brand.id)
+            .join(Category, Product.category_id == Category.id)
+            .where(Shade.id == item.shadeId)
+        )
+        row = row.first()
+        if not row:
+            raise HTTPException(404, f"Shade not found: {item.shadeId}")
+        shade_rows.append(row)
+
+    # ── Validate same zone ────────────────────────────────────────
+    zones = set(CATEGORY_ZONE.get(row[3].slug, "unknown") for row in shade_rows)
+    if len(zones) > 1:
+        raise HTTPException(
+            400,
+            f"All items must be in the same zone. Got: {zones}. "
+            f"Multi-zone support coming soon."
+        )
+
+    # ── Sort by application order ─────────────────────────────────
+    category_slugs = [row[3].slug for row in shade_rows]
+    ordered_slugs  = sort_shade_ids_by_zone_order(category_slugs)
+    slug_to_row    = {row[3].slug: row for row in shade_rows}
+    ordered_rows   = [slug_to_row[slug] for slug in ordered_slugs if slug in slug_to_row]
+
+    # ── Build prompt — single or combo ────────────────────────────
+    session_id = str(uuid.uuid4())
+
+    if len(ordered_rows) == 1:
+        shade, product, brand, category = ordered_rows[0]
+        prompt = build_prompt(
+            category_slug      = category.slug,
+            product_data       = {
+                "category_slug": category.slug,
+                "brand_name":    brand.name,
+                "product_name":  product.name,
+                "shade_name":    shade.name,
+            },
+            detected_skin_tone = req.detected_skin_tone,
+        )
+    else:
+        prompt_steps = []
+        for shade, product, brand, category in ordered_rows:
+            prompt_steps.append({
+                "category_slug": category.slug,
+                "product_data": {
+                    "brand_name": brand.name,
+                    "shade_name": shade.name,
+                },
+            })
+        prompt = build_combined_prompt(
+            steps              = prompt_steps,
+            detected_skin_tone = req.detected_skin_tone,
+        )
+
+    # ── Create job ────────────────────────────────────────────────
+    primary_shade = ordered_rows[0][0]
+    zone_value    = _strip_zone(list(zones)[0])
 
     job = GenerationJob(
-        session_id  = str(uuid.uuid4()),
+        user_id     = current_user.id,
+        session_id  = session_id,
         chain_order = 0,
-        shade_id    = shade.id,
+        shade_id    = primary_shade.id,
         upload_path = req.upload_path,
         input_path  = req.upload_path,
         prompt_used = prompt,
+        zone        = zone_value,
         status      = "pending",
     )
     db.add(job)
     await db.commit()
     await db.refresh(job)
 
+    # ── Save all cart items for history ───────────────────────────
+    for shade, product, brand, category in ordered_rows:
+        db.add(GenerationJobItem(
+            job_id     = job.id,
+            product_id = product.id,
+            shade_id   = shade.id,
+        ))
+    await db.commit()
+
     return {
-        "job_id":  job.id,
-        "status":  "pending",
-        "message": "Job queued. Poll GET /jobs/{job_id} for result.",
+        "job_id":         job.id,
+        "status":         "pending",
+        "session_id":     session_id,
+        "message":        "Job queued. Poll GET /jobs/{job_id} for result.",
+        "zone":           zone_value,
+        "shades_applied": [
+            {
+                "category": cat.slug,
+                "shade":    shade.name,
+                "product":  product.name,
+            }
+            for shade, product, brand, cat in ordered_rows
+        ],
     }
 
 
@@ -163,10 +319,16 @@ async def get_job(job_id: str, db: AsyncSession = Depends(get_db)):
     job = result.scalar_one_or_none()
     if not job:
         raise HTTPException(404, "Job not found")
+
+    result_url = None
+    if job.status == "completed" and job.result_path:
+        filename   = Path(job.result_path).name
+        result_url = f"{BASE_URL}/results/{filename}"
+
     return {
         "job_id":          job.id,
         "status":          job.status,
-        "result_path":     job.result_path if job.status == "complete" else None,
+        "result_url":      result_url,
         "generation_time": job.generation_time,
         "error":           job.error_message if job.status == "failed" else None,
         "session_id":      job.session_id,
@@ -175,92 +337,90 @@ async def get_job(job_id: str, db: AsyncSession = Depends(get_db)):
     }
 
 
-# ── COMBO GENERATION ──────────────────────────────────────────────
+# ── CANCEL JOB ────────────────────────────────────────────────────
 
-class GenerateComboRequest(BaseModel):
-    shade_ids:          list[str]
-    upload_path:        str
-    detected_skin_tone: str = "medium"
+@app.delete("/jobs/{job_id}")
+async def cancel_job(
+    job_id:       str,
+    current_user: User         = Depends(get_current_user),
+    db:           AsyncSession = Depends(get_db),
+):
+    result = await db.execute(select(GenerationJob).where(GenerationJob.id == job_id))
+    job = result.scalar_one_or_none()
+    if not job:
+        raise HTTPException(404, "Job not found")
+    if job.user_id != current_user.id:
+        raise HTTPException(403, "Not your job")
+    if job.status in ("completed", "failed", "cancelled"):
+        return {"job_id": job_id, "status": job.status, "message": "Already finished"}
+
+    # Mark in DB
+    job.status = "cancelled"
+    await db.commit()
+
+    # Signal worker to abort mid-flight if already processing
+    cancelled_jobs.add(job_id)
+
+    return {"job_id": job_id, "status": "cancelled"}
 
 
-@app.post("/generate-combo")
-async def generate_combo_endpoint(req: GenerateComboRequest, db: AsyncSession = Depends(get_db)):
+# ── HISTORY ───────────────────────────────────────────────────────
 
-    if len(req.shade_ids) < 2:
-        raise HTTPException(400, "Use /generate for a single shade. /generate-combo requires 2+ shades.")
-    if len(req.shade_ids) > 4:
-        raise HTTPException(400, "Maximum 4 shades per combo request.")
-
-    # ── 1. Load all shades ────────────────────────────────────────
-    shade_rows = []
-    for shade_id in req.shade_ids:
-        row = await db.execute(
-            select(Shade, Product, Brand, Category)
-            .join(Product,  Shade.product_id    == Product.id)
-            .join(Brand,    Product.brand_id    == Brand.id)
-            .join(Category, Product.category_id == Category.id)
-            .where(Shade.id == shade_id)
+@app.get("/history")
+async def get_history(
+    current_user: User         = Depends(get_current_user),
+    db:           AsyncSession = Depends(get_db),
+    limit:        int          = 20,
+    offset:       int          = 0,
+):
+    """Returns the authenticated user's generation history, newest first."""
+    result = await db.execute(
+        select(GenerationJob)
+        .where(
+            GenerationJob.user_id == current_user.id,
+            GenerationJob.status  == "completed",
         )
-        row = row.first()
-        if not row:
-            raise HTTPException(404, f"Shade not found: {shade_id}")
-        shade_rows.append(row)
+        .options(
+            selectinload(GenerationJob.items).selectinload(GenerationJobItem.product).selectinload(Product.brand),
+            selectinload(GenerationJob.items).selectinload(GenerationJobItem.shade),
+        )
+        .order_by(GenerationJob.created_at.desc())
+        .limit(limit)
+        .offset(offset)
+    )
+    jobs = result.scalars().all()
 
-    # ── 2. Validate same zone ─────────────────────────────────────
-    zones = set(CATEGORY_ZONE.get(row[3].slug, "unknown") for row in shade_rows)
-    if len(zones) > 1:
-        raise HTTPException(400, f"All shades must be in the same zone. Got: {zones}")
+    history = []
+    for job in jobs:
+        result_url  = f"{BASE_URL}/results/{Path(job.result_path).name}" if job.result_path else None
+        upload_url  = f"{BASE_URL}/uploads/{Path(job.upload_path).name}" if job.upload_path else None
 
-    # ── 3. Sort by application order ──────────────────────────────
-    category_slugs = [row[3].slug for row in shade_rows]
-    ordered_slugs  = sort_shade_ids_by_zone_order(category_slugs)
-    slug_to_row    = {row[3].slug: row for row in shade_rows}
-    ordered_rows   = [slug_to_row[slug] for slug in ordered_slugs if slug in slug_to_row]
+        upload_path_exists = job.upload_path and Path(job.upload_path).exists()
 
-    if not ordered_rows:
-        raise HTTPException(400, "Could not order shades — check category slugs.")
-
-    # ── 4. Build combined prompt ──────────────────────────────────
-    prompt_steps = []
-    for shade, product, brand, category in ordered_rows:
-        prompt_steps.append({
-            "category_slug": category.slug,
-            "product_data":  {
-                "brand_name": brand.name,
-                "shade_name": shade.name,
-            },
+        history.append({
+            "id":            job.id,
+            "createdAt":     job.created_at.isoformat() if job.created_at else None,
+            "zone":          job.zone or "",
+            "resultImage":   result_url,
+            "originalImage": upload_url,
+            "uploadPath":    job.upload_path if upload_path_exists else None,
+            "cart": [
+                {
+                    "productId": item.product_id,
+                    "shadeId":   item.shade_id,
+                }
+                for item in job.items
+            ],
+            "cartMeta": [
+                {
+                    "productId":  item.product_id,
+                    "shadeName":  item.shade.name,
+                    "shadeHex":   item.shade.hex_color or "#000000",
+                    "brandName":  item.product.brand.name if item.product.brand else "",
+                    "categoryId": item.product.category_id,
+                }
+                for item in job.items
+            ],
         })
 
-    combined_prompt = build_combined_prompt(
-        steps              = prompt_steps,
-        detected_skin_tone = req.detected_skin_tone,
-    )
-
-    # ── 5. Create job ─────────────────────────────────────────────
-    session_id    = str(uuid.uuid4())
-    primary_shade = ordered_rows[0][0]
-
-    job = GenerationJob(
-        session_id  = session_id,
-        chain_order = 0,
-        shade_id    = primary_shade.id,
-        upload_path = req.upload_path,
-        input_path  = req.upload_path,
-        prompt_used = combined_prompt,
-        status      = "pending",
-    )
-    db.add(job)
-    await db.commit()
-    await db.refresh(job)
-
-    return {
-        "job_id":         job.id,
-        "status":         "pending",
-        "message":        "Job queued. Poll GET /jobs/{job_id} for result.",
-        "zone":           list(zones)[0],
-        "session_id":     session_id,
-        "shades_applied": [
-            {"category": cat.slug, "shade": shade.name, "product": product.name}
-            for shade, product, brand, cat in ordered_rows
-        ],
-    }
+    return history

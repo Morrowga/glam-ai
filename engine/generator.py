@@ -54,7 +54,7 @@ def _image_part(path: str) -> types.Part:
 
 
 def _save_result(img_bytes: bytes, result_path: Path):
-    Image.open(BytesIO(img_bytes)).convert("RGB").save(str(result_path), format="PNG")
+    Image.open(BytesIO(img_bytes)).convert("RGB").save(str(result_path), format="JPEG")
 
 
 def _resolve_refs(reference_paths: list[str]) -> list[str]:
@@ -180,7 +180,7 @@ async def generate_with_image_edit(
 
     start                            = time.time()
     img_bytes, refs_used, model_used = await _call(user_photo_path, prompt, reference_paths)
-    result_path                      = RESULTS_DIR / f"{job_id}.png"
+    result_path                      = RESULTS_DIR / f"{job_id}.jpg"
     _save_result(img_bytes, result_path)
 
     return {
@@ -200,7 +200,7 @@ async def generate_combo(
     prompt                           = steps[0].get("combined_prompt") or steps[0]["prompt"]
     refs                             = steps[0].get("reference_paths", [])
     img_bytes, refs_used, model_used = await _call(user_photo_path, prompt, refs)
-    result_path                      = RESULTS_DIR / f"{job_id}.png"
+    result_path                      = RESULTS_DIR / f"{job_id}.jpg"
     _save_result(img_bytes, result_path)
 
     return {

@@ -1,16 +1,5 @@
 """
 routers/auth.py
-────────────────
-Mount in main.py with:
-    from routers.auth import router as auth_router
-    app.include_router(auth_router, prefix="/auth", tags=["auth"])
-
-Endpoints:
-    POST   /auth/register
-    POST   /auth/verify-email          (token as query param)
-    POST   /auth/login
-    GET    /auth/me
-    POST   /auth/resend-verification   (optional convenience)
 """
 
 from datetime import datetime, timedelta, timezone
@@ -20,20 +9,21 @@ from pydantic import BaseModel, EmailStr, field_validator
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from db.models import get_db, User, EmailVerificationToken
+from db.models import get_db, User, EmailVerificationToken, PasswordResetToken
 from engine.auth_utils import (
     hash_password,
     verify_password,
     create_access_token,
     generate_verification_token,
 )
-from engine.auth_email import send_verification_email
+from engine.auth_email import send_verification_email, send_password_reset_email
 from engine.auth_deps import get_current_user
-from engine.credits import create_free_subscription,get_credit_balance
+from engine.credits import create_free_subscription, get_credit_balance
 
 router = APIRouter()
 
 VERIFICATION_TOKEN_EXPIRE_HOURS = 24
+RESET_TOKEN_EXPIRE_HOURS        = 1   # shorter window for security
 
 
 # ── Schemas ───────────────────────────────────────────────────────────────────
@@ -73,10 +63,27 @@ class UserResponse(BaseModel):
     total_available:   int
 
 
+class ForgotPasswordRequest(BaseModel):
+    email: EmailStr
+
+
+class ResetPasswordRequest(BaseModel):
+    token:        str
+    email:        EmailStr
+    new_password: str
+
+    @field_validator("new_password")
+    @classmethod
+    def password_strength(cls, v: str) -> str:
+        if len(v) < 8:
+            raise ValueError("Password must be at least 8 characters")
+        return v
+
+
 # ── Helpers ───────────────────────────────────────────────────────────────────
 
-def _token_expiry() -> datetime:
-    return datetime.now(timezone.utc) + timedelta(hours=VERIFICATION_TOKEN_EXPIRE_HOURS)
+def _token_expiry(hours: int) -> datetime:
+    return datetime.now(timezone.utc) + timedelta(hours=hours)
 
 
 async def _create_and_send_verification(user: User, db: AsyncSession, bg: BackgroundTasks):
@@ -84,11 +91,10 @@ async def _create_and_send_verification(user: User, db: AsyncSession, bg: Backgr
     vt = EmailVerificationToken(
         user_id    = user.id,
         token      = token_str,
-        expires_at = _token_expiry(),
+        expires_at = _token_expiry(VERIFICATION_TOKEN_EXPIRE_HOURS),
     )
     db.add(vt)
     await db.commit()
-    # Send email in background so the HTTP response is instant
     bg.add_task(send_verification_email, user.email, token_str)
 
 
@@ -100,16 +106,15 @@ async def register(
     bg:  BackgroundTasks,
     db:  AsyncSession = Depends(get_db),
 ):
-    # Duplicate email check
     existing = await db.execute(select(User).where(User.email == req.email))
     if existing.scalar_one_or_none():
         raise HTTPException(status_code=400, detail="Email already registered")
 
     user = User(
-        email        = req.email,
+        email         = req.email,
         password_hash = hash_password(req.password),
-        display_name = req.display_name,
-        is_verified  = False,
+        display_name  = req.display_name,
+        is_verified   = False,
     )
     db.add(user)
     await db.commit()
@@ -140,17 +145,14 @@ async def verify_email(
     if not vt:
         raise HTTPException(status_code=400, detail="Invalid or already-used verification token")
 
-    # Check expiry
-    now = datetime.now(timezone.utc)
+    now     = datetime.now(timezone.utc)
     expires = vt.expires_at
-    # Make timezone-aware if stored as naive UTC
     if expires.tzinfo is None:
         expires = expires.replace(tzinfo=timezone.utc)
 
     if now > expires:
         raise HTTPException(status_code=400, detail="Verification token expired. Request a new one.")
 
-    # Mark verified
     vt.used = True
     user_result = await db.execute(select(User).where(User.id == vt.user_id))
     user = user_result.scalar_one_or_none()
@@ -169,7 +171,6 @@ async def login(
     result = await db.execute(select(User).where(User.email == req.email, User.is_active == True))
     user = result.scalar_one_or_none()
 
-    # Same error message for wrong email OR wrong password — avoids user enumeration
     if not user or not verify_password(req.password, user.password_hash):
         raise HTTPException(status_code=401, detail="Invalid email or password")
 
@@ -179,7 +180,6 @@ async def login(
             detail="Email not verified. Please check your inbox or request a new verification email.",
         )
 
-    # Update last login
     user.last_login_at = datetime.now(timezone.utc)
     await db.commit()
 
@@ -212,10 +212,6 @@ async def resend_verification(
     bg:  BackgroundTasks,
     db:  AsyncSession = Depends(get_db),
 ):
-    """
-    Lets a user request a fresh verification email.
-    Requires email + password to prevent abuse.
-    """
     result = await db.execute(select(User).where(User.email == req.email, User.is_active == True))
     user = result.scalar_one_or_none()
 
@@ -227,3 +223,88 @@ async def resend_verification(
 
     await _create_and_send_verification(user, db, bg)
     return {"message": "Verification email resent. Please check your inbox."}
+
+
+# ── Forgot / Reset Password ───────────────────────────────────────────────────
+
+@router.post("/forgot-password")
+async def forgot_password(
+    req: ForgotPasswordRequest,
+    bg:  BackgroundTasks,
+    db:  AsyncSession = Depends(get_db),
+):
+    """
+    Always returns 200 to avoid user enumeration.
+    Only sends email if account exists and is verified.
+    """
+    result = await db.execute(
+        select(User).where(User.email == req.email, User.is_active == True)
+    )
+    user = result.scalar_one_or_none()
+
+    if user and user.is_verified:
+        # Invalidate any existing unused reset tokens for this user
+        existing = await db.execute(
+            select(PasswordResetToken).where(
+                PasswordResetToken.user_id == user.id,
+                PasswordResetToken.used    == False,
+            )
+        )
+        for old_token in existing.scalars().all():
+            old_token.used = True
+        await db.commit()
+
+        # Create new token
+        token_str = generate_verification_token()
+        rt = PasswordResetToken(
+            user_id    = user.id,
+            token      = token_str,
+            expires_at = _token_expiry(RESET_TOKEN_EXPIRE_HOURS),
+        )
+        db.add(rt)
+        await db.commit()
+
+        bg.add_task(send_password_reset_email, user.email, token_str)
+
+    return {"message": "If that email exists, a reset link has been sent."}
+
+
+@router.post("/reset-password")
+async def reset_password(
+    req: ResetPasswordRequest,
+    db:  AsyncSession = Depends(get_db),
+):
+    # Find the token
+    result = await db.execute(
+        select(PasswordResetToken).where(
+            PasswordResetToken.token == req.token,
+            PasswordResetToken.used  == False,
+        )
+    )
+    rt = result.scalar_one_or_none()
+
+    if not rt:
+        raise HTTPException(status_code=400, detail="Invalid or already-used reset token")
+
+    # Check expiry
+    now     = datetime.now(timezone.utc)
+    expires = rt.expires_at
+    if expires.tzinfo is None:
+        expires = expires.replace(tzinfo=timezone.utc)
+
+    if now > expires:
+        raise HTTPException(status_code=400, detail="Reset token expired. Please request a new one.")
+
+    # Verify email matches the token owner
+    user_result = await db.execute(select(User).where(User.id == rt.user_id))
+    user = user_result.scalar_one_or_none()
+
+    if not user or user.email != req.email:
+        raise HTTPException(status_code=400, detail="Invalid reset token")
+
+    # Update password and mark token used
+    user.password_hash = hash_password(req.new_password)
+    rt.used = True
+    await db.commit()
+
+    return {"message": "Password reset successfully. You can now log in."}

@@ -17,7 +17,6 @@ def gen_id():
 
 class User(Base):
     __tablename__ = "users"
-
     id             = Column(String,  primary_key=True, default=gen_id)
     email          = Column(String(255), unique=True, nullable=False, index=True)
     password_hash  = Column(String(255), nullable=False)
@@ -27,89 +26,71 @@ class User(Base):
     created_at     = Column(DateTime, server_default=func.now())
     last_login_at  = Column(DateTime, nullable=True)
 
-
 class EmailVerificationToken(Base):
     __tablename__ = "email_verification_tokens"
-
     id         = Column(String,  primary_key=True, default=gen_id)
     user_id    = Column(String,  ForeignKey("users.id"), nullable=False)
     token      = Column(String(64), unique=True, nullable=False, index=True)
     expires_at = Column(DateTime, nullable=False)
     used       = Column(Boolean, default=False)
     created_at = Column(DateTime, server_default=func.now())
-
     user = relationship("User")
 
+class PasswordResetToken(Base):
+    __tablename__ = "password_reset_tokens"
+    id         = Column(String,  primary_key=True, default=gen_id)
+    user_id    = Column(String,  ForeignKey("users.id"), nullable=False)
+    token      = Column(String(64), unique=True, nullable=False, index=True)
+    expires_at = Column(DateTime, nullable=False)
+    used       = Column(Boolean, default=False)
+    created_at = Column(DateTime, server_default=func.now())
+    user       = relationship("User")
+
 class Plan(Base):
-    """
-    Master plan definitions — seeded once, not user-specific.
-    plan_type: free | basic | glam | payg
-
-    Pricing is stored in 3 currencies:
-    - price_usd: default / all other countries
-    - price_thb: Thailand
-    - price_mmk: Myanmar
-    For PAYG: price_per_credit_usd / price_per_credit_thb / price_per_credit_mmk
-    """
     __tablename__ = "plans"
-
     id               = Column(String,  primary_key=True, default=gen_id)
     name             = Column(String(50),  nullable=False)
     plan_type        = Column(String(20),  nullable=False, unique=True)
     credits          = Column(Integer, nullable=False)
     is_subscription  = Column(Boolean, default=False)
     is_active        = Column(Boolean, default=True)
-
-    # Subscription prices (monthly)
     price_usd        = Column(Float, nullable=False, default=0.0)
-    price_thb        = Column(Float, nullable=True)   # Thailand Baht
-    price_mmk        = Column(Float, nullable=True)   # Myanmar Kyat
-
-    # PAYG-specific
+    price_thb        = Column(Float, nullable=True)
+    price_mmk        = Column(Float, nullable=True)
     min_credits          = Column(Integer, nullable=True)
     max_credits          = Column(Integer, nullable=True)
-    price_per_credit     = Column(Float,   nullable=True)   # USD per credit
-    price_per_credit_thb = Column(Float,   nullable=True)   # THB per credit
-    price_per_credit_mmk = Column(Float,   nullable=True)   # MMK per credit
-
+    price_per_credit     = Column(Float,   nullable=True)
+    price_per_credit_thb = Column(Float,   nullable=True)
+    price_per_credit_mmk = Column(Float,   nullable=True)
 
 class UserSubscription(Base):
     __tablename__ = "user_subscriptions"
-
     id                   = Column(String,  primary_key=True, default=gen_id)
     user_id              = Column(String,  ForeignKey("users.id"), nullable=False, unique=True)
     plan_type            = Column(String(20), nullable=False, default="free")
-
     credits_total        = Column(Integer, nullable=False, default=1)
     credits_used         = Column(Integer, nullable=False, default=0)
     credits_remaining    = Column(Integer, nullable=False, default=1)
-
     payg_credits         = Column(Integer, nullable=False, default=0)
     payg_expires_at      = Column(DateTime, nullable=True)
-
     current_period_start = Column(DateTime, nullable=True)
     current_period_end   = Column(DateTime, nullable=True)
-
     created_at           = Column(DateTime, server_default=func.now())
     updated_at           = Column(DateTime, server_default=func.now(), onupdate=func.now())
-
     user                 = relationship("User")
-
 
 class PurchaseRecord(Base):
     __tablename__ = "purchase_records"
-
     id                = Column(String,  primary_key=True, default=gen_id)
     user_id           = Column(String,  ForeignKey("users.id"), nullable=False)
     plan_type         = Column(String(20), nullable=False)
     credits_purchased = Column(Integer, nullable=False)
     amount_usd        = Column(Float,   nullable=False)
-    amount_local      = Column(Float,   nullable=True)   # amount in local currency
-    currency          = Column(String(10), nullable=True) # THB / MMK / USD
+    amount_local      = Column(Float,   nullable=True)
+    currency          = Column(String(10), nullable=True)
     payment_intent_id = Column(String,  nullable=True)
     status            = Column(String(20), default="completed")
     created_at        = Column(DateTime, server_default=func.now())
-
     user              = relationship("User")
 
 class Brand(Base):
@@ -170,6 +151,7 @@ class ReferenceImage(Base):
 class GenerationJob(Base):
     __tablename__ = "generation_jobs"
     id              = Column(String, primary_key=True, default=gen_id)
+    user_id         = Column(String, ForeignKey("users.id"), nullable=True, index=True)
     session_id      = Column(String, index=True, nullable=True)
     chain_order     = Column(Integer, default=0)
     input_path      = Column(Text)
@@ -177,6 +159,7 @@ class GenerationJob(Base):
     upload_path     = Column(Text)
     result_path     = Column(Text)
     prompt_used     = Column(Text)
+    zone            = Column(String(20), nullable=True)  # 'lip' | 'eye' | 'cheek'
     status          = Column(String(20), default="pending")
     cached          = Column(Boolean, default=False)
     error_message   = Column(Text)
@@ -184,6 +167,23 @@ class GenerationJob(Base):
     created_at      = Column(DateTime, server_default=func.now())
     completed_at    = Column(DateTime)
     shade           = relationship("Shade", back_populates="jobs")
+    user            = relationship("User")
+    items           = relationship("GenerationJobItem", back_populates="job", cascade="all, delete-orphan")
+
+
+class GenerationJobItem(Base):
+    """One row per product+shade used in a generation job."""
+    __tablename__ = "generation_job_items"
+
+    id         = Column(String, primary_key=True, default=gen_id)
+    job_id     = Column(String, ForeignKey("generation_jobs.id"), nullable=False, index=True)
+    product_id = Column(String, ForeignKey("products.id"),        nullable=False)
+    shade_id   = Column(String, ForeignKey("shades.id"),          nullable=False)
+
+    job     = relationship("GenerationJob", back_populates="items")
+    product = relationship("Product")
+    shade   = relationship("Shade")
+
 
 async def init_db():
     async with engine.begin() as conn:
