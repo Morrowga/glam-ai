@@ -166,6 +166,10 @@ class GenerationJob(Base):
     generation_time = Column(Float)
     created_at      = Column(DateTime, server_default=func.now())
     completed_at    = Column(DateTime)
+    # ── Share ──────────────────────────────────────────────────────
+    share_token     = Column(String(64), unique=True, nullable=True, index=True)
+    is_shared       = Column(Boolean, default=False, nullable=False)
+    # ──────────────────────────────────────────────────────────────
     shade           = relationship("Shade", back_populates="jobs")
     user            = relationship("User")
     items           = relationship("GenerationJobItem", back_populates="job", cascade="all, delete-orphan")

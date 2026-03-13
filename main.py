@@ -6,7 +6,15 @@ from sqlalchemy import select
 from sqlalchemy.orm import selectinload
 from pydantic import BaseModel
 from db.models import init_db, get_db, Brand, Category, Product, Shade, GenerationJob, GenerationJobItem, ReferenceImage, User
-from engine.prompt_engine import build_prompt, build_combined_prompt, sort_shade_ids_by_zone_order, CATEGORY_ZONE
+import secrets
+from engine.prompt_engine import (
+    build_prompt,
+    build_combined_prompt,
+    build_multizone_prompt,
+    sort_shade_ids_by_zone_order,
+    sort_rows_by_multizone_order,
+    CATEGORY_ZONE,
+)
 from engine.face_validator import validate_photo
 from engine.auth_deps import get_current_user, verify_public_token
 from engine.credits import check_has_credits
@@ -46,7 +54,6 @@ app.include_router(payments_router, prefix="/payments", tags=["payments"])
 # ── ZONE HELPER ───────────────────────────────────────────────────
 
 def _strip_zone(zone: str) -> str:
-    """Convert DB zone 'lips/eyes/cheeks' → frontend 'lip/eye/cheek'"""
     return zone.rstrip("s") if zone else zone
 
 
@@ -75,7 +82,6 @@ async def get_brand_categories(brand_slug: str, db: AsyncSession = Depends(get_d
     brand = brand.scalar_one_or_none()
     if not brand:
         raise HTTPException(404, "Brand not found")
-
     result = await db.execute(
         select(Category).join(Product).where(Product.brand_id == brand.id).distinct()
     )
@@ -144,12 +150,9 @@ async def upload_photo(file: UploadFile = File(...), _: None = Depends(verify_pu
     file_id   = str(uuid.uuid4())[:8]
     ext       = file.filename.split(".")[-1]
     save_path = UPLOAD_DIR / f"{file_id}.{ext}"
-
     with open(save_path, "wb") as f:
         shutil.copyfileobj(file.file, f)
-
     validation = await validate_photo(str(save_path.resolve()))
-
     if not validation["pass"]:
         save_path.unlink(missing_ok=True)
         raise HTTPException(
@@ -159,12 +162,27 @@ async def upload_photo(file: UploadFile = File(...), _: None = Depends(verify_pu
                 "validation": validation["details"],
             }
         )
-
     return {
         "upload_path": str(save_path.resolve()),
         "file_id":     file_id,
+        "skin_tone":   validation.get("skin_tone", "medium"),
         "validation":  validation["details"],
     }
+
+
+# ── CHEEKS ZONE LIMIT ─────────────────────────────────────────────
+
+def _validate_cheeks(shade_rows: list) -> None:
+    cheek_rows = [r for r in shade_rows if CATEGORY_ZONE.get(r[3].slug) == "cheeks"]
+    if len(cheek_rows) > 1:
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                f"Only one cheeks product allowed per generation. "
+                f"You selected: {[r[3].slug for r in cheek_rows]}. "
+                f"Choose either blush, bronzer, or highlighter."
+            ),
+        )
 
 
 # ── UNIFIED GENERATE ──────────────────────────────────────────────
@@ -186,27 +204,19 @@ async def generate(
     current_user: User           = Depends(get_current_user),
     db:           AsyncSession   = Depends(get_db),
 ):
-    # ── Auth: check credits before queuing ────────────────────────
     has_credits = await check_has_credits(current_user.id, db)
     if not has_credits:
-        raise HTTPException(
-            status_code=402,
-            detail="No credits available. Please top up to continue.",
-        )
+        raise HTTPException(402, "No credits available. Please top up to continue.")
 
-    # ── Validate upload file exists ───────────────────────────────
     if not Path(req.upload_path).exists():
-        raise HTTPException(
-            status_code=422,
-            detail="Upload file not found. Please upload your photo first.",
-        )
+        raise HTTPException(422, "Upload file not found. Please upload your photo first.")
 
     if len(req.items) == 0:
         raise HTTPException(400, "At least one item required.")
-    if len(req.items) > 4:
-        raise HTTPException(400, "Maximum 4 items per request.")
+    if len(req.items) > 8:
+        raise HTTPException(400, "Maximum 8 items per request.")
 
-    # ── Load all shades ───────────────────────────────────────────
+    # Load all shades
     shade_rows = []
     for item in req.items:
         row = await db.execute(
@@ -221,55 +231,58 @@ async def generate(
             raise HTTPException(404, f"Shade not found: {item.shadeId}")
         shade_rows.append(row)
 
-    # ── Validate same zone ────────────────────────────────────────
-    zones = set(CATEGORY_ZONE.get(row[3].slug, "unknown") for row in shade_rows)
-    if len(zones) > 1:
-        raise HTTPException(
-            400,
-            f"All items must be in the same zone. Got: {zones}. "
-            f"Multi-zone support coming soon."
-        )
+    # Cheeks: max 1 product
+    _validate_cheeks(shade_rows)
 
-    # ── Sort by application order ─────────────────────────────────
-    category_slugs = [row[3].slug for row in shade_rows]
-    ordered_slugs  = sort_shade_ids_by_zone_order(category_slugs)
-    slug_to_row    = {row[3].slug: row for row in shade_rows}
-    ordered_rows   = [slug_to_row[slug] for slug in ordered_slugs if slug in slug_to_row]
+    # Detect zones
+    zones        = set(CATEGORY_ZONE.get(row[3].slug, "unknown") for row in shade_rows)
+    is_multizone = len(zones) > 1
+    session_id   = str(uuid.uuid4())
 
-    # ── Build prompt — single or combo ────────────────────────────
-    session_id = str(uuid.uuid4())
-
-    if len(ordered_rows) == 1:
-        shade, product, brand, category = ordered_rows[0]
-        prompt = build_prompt(
-            category_slug      = category.slug,
-            product_data       = {
-                "category_slug": category.slug,
-                "brand_name":    brand.name,
-                "product_name":  product.name,
-                "shade_name":    shade.name,
-            },
+    # Build prompt
+    if is_multizone:
+        ordered_rows = sort_rows_by_multizone_order(shade_rows)
+        prompt       = build_multizone_prompt(
+            rows               = ordered_rows,
             detected_skin_tone = req.detected_skin_tone,
         )
+        zone_value = "multi"
     else:
-        prompt_steps = []
-        for shade, product, brand, category in ordered_rows:
-            prompt_steps.append({
-                "category_slug": category.slug,
-                "product_data": {
-                    "brand_name": brand.name,
-                    "shade_name": shade.name,
+        zone_value     = _strip_zone(list(zones)[0])
+        category_slugs = [row[3].slug for row in shade_rows]
+        ordered_slugs  = sort_shade_ids_by_zone_order(category_slugs)
+        slug_to_row    = {row[3].slug: row for row in shade_rows}
+        ordered_rows   = [slug_to_row[slug] for slug in ordered_slugs if slug in slug_to_row]
+
+        if len(ordered_rows) == 1:
+            shade, product, brand, category = ordered_rows[0]
+            prompt = build_prompt(
+                category_slug      = category.slug,
+                product_data       = {
+                    "category_slug": category.slug,
+                    "brand_name":    brand.name,
+                    "product_name":  product.name,
+                    "shade_name":    shade.name,
                 },
-            })
-        prompt = build_combined_prompt(
-            steps              = prompt_steps,
-            detected_skin_tone = req.detected_skin_tone,
-        )
+                detected_skin_tone = req.detected_skin_tone,
+            )
+        else:
+            prompt_steps = []
+            for shade, product, brand, category in ordered_rows:
+                prompt_steps.append({
+                    "category_slug": category.slug,
+                    "product_data": {
+                        "brand_name": brand.name,
+                        "shade_name": shade.name,
+                    },
+                })
+            prompt = build_combined_prompt(
+                steps              = prompt_steps,
+                detected_skin_tone = req.detected_skin_tone,
+            )
 
-    # ── Create job ────────────────────────────────────────────────
+    # Create job
     primary_shade = ordered_rows[0][0]
-    zone_value    = _strip_zone(list(zones)[0])
-
     job = GenerationJob(
         user_id     = current_user.id,
         session_id  = session_id,
@@ -285,7 +298,6 @@ async def generate(
     await db.commit()
     await db.refresh(job)
 
-    # ── Save all cart items for history ───────────────────────────
     for shade, product, brand, category in ordered_rows:
         db.add(GenerationJobItem(
             job_id     = job.id,
@@ -302,9 +314,11 @@ async def generate(
         "zone":           zone_value,
         "shades_applied": [
             {
+                "zone":     CATEGORY_ZONE.get(cat.slug, "unknown"),
                 "category": cat.slug,
                 "shade":    shade.name,
                 "product":  product.name,
+                "brand":    brand.name,
             }
             for shade, product, brand, cat in ordered_rows
         ],
@@ -319,12 +333,9 @@ async def get_job(job_id: str, db: AsyncSession = Depends(get_db)):
     job = result.scalar_one_or_none()
     if not job:
         raise HTTPException(404, "Job not found")
-
     result_url = None
     if job.status == "completed" and job.result_path:
-        filename   = Path(job.result_path).name
-        result_url = f"{BASE_URL}/results/{filename}"
-
+        result_url = f"{BASE_URL}/results/{Path(job.result_path).name}"
     return {
         "job_id":          job.id,
         "status":          job.status,
@@ -353,14 +364,9 @@ async def cancel_job(
         raise HTTPException(403, "Not your job")
     if job.status in ("completed", "failed", "cancelled"):
         return {"job_id": job_id, "status": job.status, "message": "Already finished"}
-
-    # Mark in DB
     job.status = "cancelled"
     await db.commit()
-
-    # Signal worker to abort mid-flight if already processing
     cancelled_jobs.add(job_id)
-
     return {"job_id": job_id, "status": "cancelled"}
 
 
@@ -370,10 +376,11 @@ async def cancel_job(
 async def get_history(
     current_user: User         = Depends(get_current_user),
     db:           AsyncSession = Depends(get_db),
-    limit:        int          = 20,
-    offset:       int          = 0,
+    limit:        int          = 10,
+    skip:         int          = 0,
+    offset:       int          = 0,   # legacy alias
 ):
-    """Returns the authenticated user's generation history, newest first."""
+    effective_skip = skip or offset
     result = await db.execute(
         select(GenerationJob)
         .where(
@@ -385,16 +392,15 @@ async def get_history(
             selectinload(GenerationJob.items).selectinload(GenerationJobItem.shade),
         )
         .order_by(GenerationJob.created_at.desc())
-        .limit(limit)
-        .offset(offset)
+        .limit(min(limit, 50))
+        .offset(effective_skip)
     )
     jobs = result.scalars().all()
 
     history = []
     for job in jobs:
-        result_url  = f"{BASE_URL}/results/{Path(job.result_path).name}" if job.result_path else None
-        upload_url  = f"{BASE_URL}/uploads/{Path(job.upload_path).name}" if job.upload_path else None
-
+        result_url         = f"{BASE_URL}/results/{Path(job.result_path).name}" if job.result_path else None
+        upload_url         = f"{BASE_URL}/uploads/{Path(job.upload_path).name}" if job.upload_path else None
         upload_path_exists = job.upload_path and Path(job.upload_path).exists()
 
         history.append({
@@ -405,10 +411,7 @@ async def get_history(
             "originalImage": upload_url,
             "uploadPath":    job.upload_path if upload_path_exists else None,
             "cart": [
-                {
-                    "productId": item.product_id,
-                    "shadeId":   item.shade_id,
-                }
+                {"productId": item.product_id, "shadeId": item.shade_id}
                 for item in job.items
             ],
             "cartMeta": [
@@ -424,3 +427,127 @@ async def get_history(
         })
 
     return history
+
+
+# ── SHARE ─────────────────────────────────────────────────────────
+
+FRONTEND_URL = os.getenv('FRONTEND_URL', 'http://localhost:3000')
+
+@app.post('/jobs/{job_id}/share')
+async def create_share_link(
+    job_id:       str,
+    current_user: User         = Depends(get_current_user),
+    db:           AsyncSession = Depends(get_db),
+):
+    result = await db.execute(select(GenerationJob).where(GenerationJob.id == job_id))
+    job = result.scalar_one_or_none()
+    if not job:
+        raise HTTPException(404, 'Job not found')
+    if job.user_id != current_user.id:
+        raise HTTPException(403, 'Not your job')
+    if job.status != 'completed' or not job.result_path:
+        raise HTTPException(400, 'Job not completed yet')
+
+    # Re-use existing token or generate new one
+    if not job.share_token:
+        job.share_token = secrets.token_urlsafe(32)
+    job.is_shared = True
+    await db.commit()
+    await db.refresh(job)
+
+    return {
+        'share_url':   f'{FRONTEND_URL}/look/{job.share_token}',
+        'share_token': job.share_token,
+    }
+
+
+@app.delete('/jobs/{job_id}/share')
+async def revoke_share_link(
+    job_id:       str,
+    current_user: User         = Depends(get_current_user),
+    db:           AsyncSession = Depends(get_db),
+):
+    result = await db.execute(select(GenerationJob).where(GenerationJob.id == job_id))
+    job = result.scalar_one_or_none()
+    if not job:
+        raise HTTPException(404, 'Job not found')
+    if job.user_id != current_user.id:
+        raise HTTPException(403, 'Not your job')
+    job.is_shared = False
+    await db.commit()
+    return {'message': 'Share link revoked'}
+
+
+@app.get('/share/{share_token}')
+async def get_shared_look(
+    share_token: str,
+    db:          AsyncSession = Depends(get_db),
+):
+    result = await db.execute(
+        select(GenerationJob)
+        .where(
+            GenerationJob.share_token == share_token,
+            GenerationJob.is_shared   == True,
+            GenerationJob.status      == 'completed',
+        )
+        .options(
+            selectinload(GenerationJob.items).selectinload(GenerationJobItem.product).selectinload(Product.brand),
+            selectinload(GenerationJob.items).selectinload(GenerationJobItem.shade),
+            selectinload(GenerationJob.items).selectinload(GenerationJobItem.product).selectinload(Product.category),
+        )
+    )
+    job = result.scalar_one_or_none()
+    if not job:
+        raise HTTPException(404, 'Look not found or no longer shared')
+
+    return {
+        'share_token': share_token,
+        'zone':        job.zone,
+        'created_at':  job.created_at.isoformat() if job.created_at else None,
+        'image_url': f'{BASE_URL}/share/{share_token}/image',
+        'shades': [
+            {
+                'productId':  item.product_id,
+                'productName': item.product.name if item.product else '',
+                'brandName':  item.product.brand.name if item.product and item.product.brand else '',
+                'shadeName':  item.shade.name if item.shade else '',
+                'shadeHex':   item.shade.hex_color or '#000000' if item.shade else '#000000',
+                'categoryId': item.product.category_id if item.product else '',
+                'categoryName': item.product.category.name if item.product and item.product.category else '',
+            }
+            for item in job.items
+        ],
+    }
+
+
+@app.get('/share/{share_token}/image')
+async def get_shared_image(
+    share_token: str,
+    db:          AsyncSession = Depends(get_db),
+):
+    """Proxy the result image — only serves if is_shared=True."""
+    from fastapi.responses import FileResponse
+    result = await db.execute(
+        select(GenerationJob)
+        .where(
+            GenerationJob.share_token == share_token,
+            GenerationJob.is_shared   == True,
+            GenerationJob.status      == 'completed',
+        )
+    )
+    job = result.scalar_one_or_none()
+    if not job or not job.result_path:
+        raise HTTPException(404, 'Image not found or no longer shared')
+
+    path = Path(job.result_path)
+    if not path.exists():
+        raise HTTPException(404, 'Image file not found')
+
+    return FileResponse(
+        path,
+        media_type='image/png',
+        headers={
+            'Cache-Control': 'public, max-age=3600',
+            'Content-Disposition': 'inline',
+        }
+    )
