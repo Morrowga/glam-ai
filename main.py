@@ -16,8 +16,9 @@ from engine.prompt_engine import (
     CATEGORY_ZONE,
 )
 from engine.face_validator import validate_photo
+from engine.skin_analyzer import analyze_skin_tone
 from engine.auth_deps import get_current_user, verify_public_token
-from engine.credits import check_has_credits
+from engine.credits import check_has_credits, deduct_credit
 from contextlib import asynccontextmanager
 import shutil, uuid, os, asyncio
 from pathlib import Path
@@ -551,3 +552,45 @@ async def get_shared_image(
             'Content-Disposition': 'inline',
         }
     )
+
+class SkinAnalyzeRequest(BaseModel):
+    upload_path: str
+
+
+@app.post("/analyze-skin")
+async def analyze_skin(
+    req:          SkinAnalyzeRequest,
+    current_user: User         = Depends(get_current_user),
+    db:           AsyncSession = Depends(get_db),
+):
+    """
+    Analyze skin tone and color season from an already-uploaded photo.
+    Costs 1 credit. Deducts after successful analysis.
+
+    Returns:
+      skin_tone:           fair | light | medium | tan | deep
+      undertone:           warm | cool | neutral
+      hex:                 "#C4956A"
+      season:              Spring | Summer | Autumn | Winter
+      season_description:  str
+      recommended_colors:  [{ name, hex, category, why }, ...]  (6 items)
+    """
+    # Check credits before doing any work
+    has_credits = await check_has_credits(current_user.id, db)
+    if not has_credits:
+        raise HTTPException(402, "No credits available. Please top up to continue.")
+
+    if not Path(req.upload_path).exists():
+        raise HTTPException(422, "Upload file not found. Please upload your photo first.")
+
+    try:
+        result = await analyze_skin_tone(req.upload_path)
+    except FileNotFoundError:
+        raise HTTPException(422, "Upload file not found.")
+    except Exception as e:
+        raise HTTPException(500, f"Analysis failed: {str(e)}")
+
+    # Deduct 1 credit only after successful analysis
+    await deduct_credit(current_user.id, db)
+
+    return result

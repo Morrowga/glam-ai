@@ -1,5 +1,7 @@
 # GlamAI — Commands & Setup Reference
 
+---
+
 ## Python & Virtual Environment
 
 ### Requirements
@@ -33,13 +35,12 @@ deactivate
 
 ### Install packages
 ```bash
-# Use full path to avoid wrong Python being used
 venv/bin/pip install -r requirements.txt
 ```
 
 ---
 
-## Required Packages
+## Required Packages (requirements.txt)
 
 ```txt
 fastapi==0.111.0
@@ -58,11 +59,11 @@ greenlet
 # Auth
 python-jose[cryptography]==3.3.0
 passlib[bcrypt]==1.7.4
-bcrypt==4.0.1
 email-validator==2.1.1
 
-# Gemini
+# Gemini (generation + skin analysis)
 google-generativeai==0.8.6
+google-genai>=0.8.0
 googleapis-common-protos==1.73.0
 grpcio==1.78.0
 grpcio-status==1.62.3
@@ -72,11 +73,14 @@ protobuf==4.25.3
 # Face validation
 mediapipe==0.10.14
 opencv-python==4.13.0.92
+
+# Payments
+stripe==14.4.1
 ```
 
-> ⚠️ Do NOT install opencv-contrib-python or opencv-python-headless alongside opencv-python — causes conflicts.
-> ⚠️ protobuf must stay at 4.25.3 — mediapipe and google-generativeai conflict at 5.x
-> ⚠️ bcrypt must be 4.0.1 — newer versions conflict with passlib
+> ⚠️ Do NOT install `opencv-contrib-python` or `opencv-python-headless` alongside `opencv-python` — causes conflicts.
+> ⚠️ `protobuf` must stay at `4.25.3` — mediapipe and google-generativeai conflict at 5.x.
+> ⚠️ Do NOT pin `bcrypt` — let passlib resolve the version automatically.
 
 ---
 
@@ -101,12 +105,29 @@ JWT_SECRET=your-random-secret-here
 ACCESS_TOKEN_EXPIRE_MINUTES=10080
 APP_BASE_URL=http://localhost:3000        # frontend URL (for email verification link)
 
+# Public API protection
+PUBLIC_API_TOKEN=your-random-public-token-here
+
+# Stripe
+STRIPE_SECRET_KEY=sk_test_...
+STRIPE_WEBHOOK_SECRET=whsec_...
+
+# URLs
+BASE_URL=http://localhost:8087            # backend URL (for static file links)
+FRONTEND_URL=http://localhost:3000        # frontend URL (for share links)
+
 # Admin + Auth email (shared SMTP config)
 ADMIN_EMAIL=admin@yourdomain.com
 SMTP_HOST=smtp.gmail.com
 SMTP_PORT=587
 SMTP_USER=your@gmail.com
 SMTP_PASS=your_gmail_app_password        # must be Gmail App Password, not regular password
+```
+
+**Frontend `.env.local`:**
+```env
+NEXT_PUBLIC_API_URL=http://localhost:8087
+NEXT_PUBLIC_API_TOKEN=your-random-public-token-here   # must match backend PUBLIC_API_TOKEN
 ```
 
 > To generate a Gmail App Password:
@@ -119,24 +140,17 @@ SMTP_PASS=your_gmail_app_password        # must be Gmail App Password, not regul
 ## Run Server
 
 ```bash
-# Development (from project root)
+# Development (from project root, with auto-reload)
 venv/bin/uvicorn main:app --reload --port 8087
 
-# Production (with worker)
+# Production
 venv/bin/uvicorn main:app --host 0.0.0.0 --port 8087 --workers 4
 ```
 
 Swagger UI: http://localhost:8087/docs
 
-## Run Worker (required for generation)
-
-```bash
-# In a separate terminal
-venv/bin/python worker.py
-```
-
-> Worker polls DB every 3 seconds for pending jobs and calls Gemini.
-> Both server and worker must be running for generation to work.
+> ⚠️ The worker is embedded in `main.py` via `lifespan` — it starts automatically with the server.
+> You do NOT need to run a separate worker process.
 
 ---
 
@@ -144,7 +158,7 @@ venv/bin/python worker.py
 
 ### Initialize (first time)
 ```bash
-# DB is auto-created on first server start via init_db()
+# Auto-created on first server start via lifespan → init_db()
 # Or run manually:
 venv/bin/python -c "import asyncio; from db.models import init_db; asyncio.run(init_db())"
 ```
@@ -172,11 +186,14 @@ sqlite3 glamai.db "SELECT u.email, s.plan_type, s.credits_remaining, s.payg_cred
 sqlite3 glamai.db "SELECT * FROM purchase_records ORDER BY created_at DESC LIMIT 10;"
 sqlite3 glamai.db "SELECT * FROM plans;"
 
-# Delete a user (also clears verification tokens and subscription)
-sqlite3 glamai.db "DELETE FROM email_verification_tokens WHERE user_id = (SELECT id FROM users WHERE email = 'email@example.com'); DELETE FROM user_subscriptions WHERE user_id = (SELECT id FROM users WHERE email = 'email@example.com'); DELETE FROM users WHERE email = 'email@example.com';"
+# Delete a user (also clears tokens and subscription)
+sqlite3 glamai.db "DELETE FROM email_verification_tokens WHERE user_id = (SELECT id FROM users WHERE email = 'test@example.com'); DELETE FROM user_subscriptions WHERE user_id = (SELECT id FROM users WHERE email = 'test@example.com'); DELETE FROM users WHERE email = 'test@example.com';"
 
 # Wipe all users
 sqlite3 glamai.db "DELETE FROM email_verification_tokens; DELETE FROM user_subscriptions; DELETE FROM users;"
+
+# Manually verify a user (skip email for dev)
+sqlite3 glamai.db "UPDATE users SET is_verified = 1 WHERE email = 'test@example.com';"
 ```
 
 ---
@@ -192,6 +209,11 @@ venv/bin/python seeds/seed_references.py  # seeds all reference images
 ### Plans only
 ```bash
 venv/bin/python seeds/seed_plans.py
+```
+
+### NYX brand only
+```bash
+venv/bin/python seeds/brands/nyx/seed_nyx.py
 ```
 
 ### Reference images — specific brand
@@ -248,14 +270,13 @@ references/
 ```
 
 ### Shade slug format
-Shade name → lowercase, spaces to hyphens, remove apostrophes
+Shade name → lowercase, spaces to hyphens, remove apostrophes:
 - `Siren` → `siren`
 - `Nude Pink` → `nude-pink`
-- `Whipped Caviar` → `whipped-caviar`
 - `Can't Stop` → `cant-stop`
 
 ### Skin tone aware references (optional)
-Add skin tone to filename — seeder auto-detects:
+Add skin tone suffix — seeder auto-detects:
 - `model_fair.jpg` → skin_tone = fair
 - `swatch_medium.jpg` → skin_tone = medium
 - `model.jpg` → skin_tone = any
@@ -266,124 +287,86 @@ Add skin tone to filename — seeder auto-detects:
 
 ```
 glamai/
-  main.py                          ← FastAPI app + all endpoints
-  worker.py                        ← job queue worker, polls DB, calls Gemini
-  Dockerfile                       ← ready for Fargate migration (not used yet)
-  .dockerignore                    ← excludes .env, uploads, results, db files
+  main.py                          ← FastAPI app + all endpoints + lifespan worker start
+  worker.py                        ← job queue worker (called from lifespan, not standalone)
+  shared_state.py                  ← cancelled_jobs set shared between main + worker
+  Dockerfile
+  .dockerignore
   db/
-    models.py                      ← SQLAlchemy models (User, Subscription, Credits, etc.)
+    models.py                      ← all SQLAlchemy models
   engine/
-    generator.py                   ← image generation (gemini-2.0-flash-image-preview)
-    prompt_engine.py               ← prompt builder per category + zone-aware layering
-    face_validator.py              ← face validation using MediaPipe (local, free, ~0.1s)
+    generator.py                   ← image generation via Gemini image model
+    prompt_engine.py               ← prompt builders per category, zone-aware layering, multi-zone
+    face_validator.py              ← MediaPipe face validation (local, ~0.1s)
+    skin_analyzer.py               ← Gemini vision skin tone + color season analysis (gemini-2.5-flash-lite)
     auth_utils.py                  ← JWT create/decode, password hash, token generator
-    auth_email.py                  ← verification email sender (reuses SMTP config)
-    auth_deps.py                   ← FastAPI dependencies: get_current_user, require_verified_user
-    credits.py                     ← credit management: grant, deduct, check balance
+    auth_email.py                  ← email sender: verification + password reset (SMTP)
+    auth_deps.py                   ← FastAPI deps: get_current_user, verify_public_token
+    credits.py                     ← credit management: create, grant, deduct, check balance
   routers/
     __init__.py
-    auth.py                        ← register, verify-email, login, me, resend-verification
-    payments.py                    ← plans, my-plan, subscribe, topup, purchase history
+    auth.py                        ← register, verify-email, login, me, resend, forgot/reset password
+    payments.py                    ← plans, my-plan, subscribe, topup, history, Stripe routes
   seeds/
-    __init__.py
     seed_general.py                ← master seeder: categories + all brands + plans
-    seed_plans.py                  ← seeds 4 plan definitions (free/basic/glam/payg)
+    seed_plans.py                  ← plan definitions (free/basic/glam/payg)
     seed_references.py             ← reference image seeder
     brands/
       nyx/
-        seed_nyx.py                ← NYX products + shades
-      mac/
-        seed_mac.py                ← (future)
+        seed_nyx.py            ← NYX: Matte Lipstick, Butter Gloss (40+ shades), Slim Lip Pencil, Ultimate Shadow Palette, Epic Ink Liner, On The Rise Mascara, Micro Brow Pencil, Sweet Cheeks Blush, Matte Bronzer, Born To Glow Highlighter
   references/                      ← reference swatch images (local)
-    nyx/
-      nyx-matte-lipstick/
-        siren/
-          swatch.jpg
   uploads/                         ← user uploaded photos
-  results/                         ← generated results
+  results/                         ← generated result images
+  media/
+    brands/                        ← brand logo images ({slug}.jpg)
+    products/                      ← product images ({slug}.jpg)
   .env
   requirements.txt
 ```
 
 ---
 
-## API Endpoints (Quick Reference)
+## Features Overview
 
-```
-# Auth
-POST /auth/register                       → create account (sends verification email)
-POST /auth/verify-email?token=xxx         → verify email address
-POST /auth/login                          → returns JWT access_token
-GET  /auth/me                             → current user info (requires Bearer token)
-POST /auth/resend-verification            → resend verification email
+### 💄 Try On (`/tryon`)
+User uploads a face photo → selects brand → product → shade → AI generates a photo with the makeup applied.
+- Supports multi-product combos (lips + eyes + cheeks in one generation)
+- Zone-aware prompt building (cheeks → eyes → lips application order)
+- History sidebar — reload past generations and re-generate
+- Share feature — tokenized public link per result
 
-# Payments & Credits
-GET  /payments/plans                      → list all plans + pricing
-GET  /payments/my-plan                    → current user's credit balance + plan
-POST /payments/subscribe                  → purchase Basic or Glam plan
-POST /payments/topup                      → purchase Pay As You Go credits (5–200)
-GET  /payments/history                    → user's purchase history
+### 🎨 Color Season Analysis (`/skin-analysis`)
+User uploads a face photo → AI analyzes skin tone, undertone, and color season.
+- Returns: Spring / Summer / Autumn / Winter season + description
+- Returns: skin tone (fair→deep), undertone (warm/cool/neutral), hex color
+- Returns: 6 personalized makeup color recommendations (2×Lip, 2×Eye, 2×Face)
+- Costs 1 credit. Uses `gemini-2.5-flash-lite` vision model.
+- Desktop: 2-column layout, typewriter animation on all result text, skeleton during loading
 
-# Catalog
-GET  /brands                              → list all brands
-GET  /brands/{brand_slug}/categories      → categories for brand
-GET  /brands/{brand_slug}/{cat}/products  → products in category
-GET  /products/{product_id}/shades        → shades for product
-
-# Generation
-POST /upload                              → upload + validate photo (MediaPipe)
-POST /generate                            → queue single product try-on → returns job_id
-POST /generate-combo                      → queue multi-product combo → returns job_id
-GET  /jobs/{job_id}                       → poll job status (pending/processing/complete/failed)
-
-# Static
-GET  /results/{filename}                  → serve result image
-```
-
-## Generation Flow
-```
-POST /upload         → validate photo → returns upload_path
-POST /generate       → queue job      → returns job_id instantly
-GET  /jobs/{job_id}  → poll every 3s  → status: pending → processing → complete
-```
-
-## Auth Flow
-```
-POST /auth/register          → creates user + sends verification email + grants 1 free credit
-                               (frontend email link → GET frontend/verify-email?token=xxx)
-POST /auth/verify-email      → marks email verified
-POST /auth/login             → returns access_token (JWT, 7 days)
-GET  /auth/me                → returns user info
-All protected routes         → require Authorization: Bearer <token> header
-```
-
-## Credit Flow
-```
-Register           → 1 free credit granted automatically
-Buy Basic          → 50 credits, resets monthly (rolling 30 days)
-Buy Glam           → 120 credits, resets monthly (rolling 30 days)
-Buy PAYG           → 5–200 credits, expires after 2 months, stacks on existing balance
-Generation         → deducts 1 credit (subscription first, then PAYG)
-Out of credits     → 402 error, must purchase more
-```
+### 👜 Look Preparation (`/look-prep`) — 🔨 Coming
+User adds her own makeup products to a "bag" (free text) → selects an occasion → AI checks if her bag is sufficient → generates a look using only her products.
+- Basic + Glam plan only
 
 ---
 
-## Plans
+## Auth & Credit Flow
 
-| Plan | Price | Credits | Reset | Expiry |
-|------|-------|---------|-------|--------|
-| Free | $0 | 1 (one-time) | Never | Never |
-| Basic | $4.99/mo | 50/mo | Rolling 30 days | Never |
-| Glam | $9.99/mo | 120/mo | Rolling 30 days | Never |
-| Pay As You Go | $0.18/credit | 5–200 | Never | 2 months |
+```
+Register    → verification email sent → 1 free credit granted on verify
+Login       → JWT (7 days) stored in Redux + cookie
+Buy Basic   → 50 credits, rolling 30-day reset
+Buy Glam    → 120 credits, rolling 30-day reset
+Buy PAYG    → 5–200 credits, stacks on existing, expires 60 days
+Any feature → 1 credit deducted on success (subscription first, then PAYG)
+Out of credits → 402 error
+```
 
 ---
 
 ## Useful Dev Commands
 
 ```bash
-# Verify mediapipe + google-generativeai both work
+# Verify key packages both work together
 venv/bin/python -c "import mediapipe; import google.generativeai; print('both ok')"
 
 # Check installed packages
@@ -392,9 +375,6 @@ venv/bin/pip list
 # Freeze requirements
 venv/bin/pip freeze > requirements.txt
 
-# Manually verify a user (skip email for dev)
-sqlite3 glamai.db "UPDATE users SET is_verified = 1 WHERE email = 'test@example.com';"
-
-# Get latest verification token
+# Get latest verification token (for testing without email)
 sqlite3 glamai.db "SELECT token FROM email_verification_tokens ORDER BY created_at DESC LIMIT 1;"
 ```
