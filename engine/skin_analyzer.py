@@ -1,20 +1,18 @@
 """
 engine/skin_analyzer.py
-Gemini-powered skin tone + color season analysis.
+Claude-powered skin tone + color season analysis.
 Called by POST /analyze-skin in main.py.
 """
 
 import os, json, re, base64
 from pathlib import Path
-import google.generativeai as genai
+from anthropic import AsyncAnthropic
 
-genai.configure(api_key=os.getenv("GEMINI_API_KEY", ""))
+client = AsyncAnthropic(api_key=os.getenv("ANTHROPIC_API_KEY", ""))
 
-MODEL = "gemini-2.5-flash-lite"
+MODEL = "claude-sonnet-4-6"
 
 # ── Season palette data ────────────────────────────────────────────
-#  Used to enrich the prompt so Gemini knows what each season means
-#  and can return consistent category names.
 
 SEASON_CONTEXT = """
 Color seasons and their makeup palettes:
@@ -74,81 +72,88 @@ Return ONLY this JSON shape:
 }
 """
 
-# ── Fallback for when Gemini can't detect a face properly ─────────
+# ── Fallback ───────────────────────────────────────────────────────
 
 FALLBACK_RESULT = {
-    "skin_tone":           "medium",
-    "undertone":           "neutral",
-    "hex":                 "#C8956A",
-    "season":              "Autumn",
-    "season_description":  "Could not detect clearly from the photo. Autumn is a versatile starting point.",
+    "skin_tone":          "medium",
+    "undertone":          "neutral",
+    "hex":                "#C8956A",
+    "season":             "Autumn",
+    "season_description": "Could not detect clearly from the photo. Autumn is a versatile starting point.",
     "recommended_colors": [
-        {"name": "Warm Nude",      "hex": "#C4956A", "category": "Lip",  "why": "Universally flattering warm nude."},
-        {"name": "Soft Coral",     "hex": "#E07B54", "category": "Lip",  "why": "Adds warmth without overpowering."},
-        {"name": "Warm Brown",     "hex": "#8B5E3C", "category": "Eye",  "why": "Defines eyes with earthy warmth."},
-        {"name": "Bronze",         "hex": "#CD7F32", "category": "Eye",  "why": "Adds depth and dimension."},
-        {"name": "Peach Blush",    "hex": "#FFAD8A", "category": "Face", "why": "Gives a natural healthy flush."},
-        {"name": "Warm Bronzer",   "hex": "#A0724A", "category": "Face", "why": "Sculpts and warms the complexion."},
+        {"name": "Warm Nude",    "hex": "#C4956A", "category": "Lip",  "why": "Universally flattering warm nude."},
+        {"name": "Soft Coral",   "hex": "#E07B54", "category": "Lip",  "why": "Adds warmth without overpowering."},
+        {"name": "Warm Brown",   "hex": "#8B5E3C", "category": "Eye",  "why": "Defines eyes with earthy warmth."},
+        {"name": "Bronze",       "hex": "#CD7F32", "category": "Eye",  "why": "Adds depth and dimension."},
+        {"name": "Peach Blush",  "hex": "#FFAD8A", "category": "Face", "why": "Gives a natural healthy flush."},
+        {"name": "Warm Bronzer", "hex": "#A0724A", "category": "Face", "why": "Sculpts and warms the complexion."},
     ],
 }
 
 
 async def analyze_skin_tone(image_path: str) -> dict:
     """
-    Upload image to Gemini, extract skin tone + color season analysis.
+    Send image to Claude, extract skin tone + color season analysis.
     Returns a dict matching SkinAnalysisResult shape.
+    Same interface as before — drop-in replacement.
     """
     path = Path(image_path)
     if not path.exists():
         raise FileNotFoundError(f"Image not found: {image_path}")
 
-    # Read and encode image
     with open(path, "rb") as f:
         image_bytes = f.read()
 
     ext_map = {".jpg": "image/jpeg", ".jpeg": "image/jpeg", ".png": "image/png", ".webp": "image/webp"}
-    mime_type = ext_map.get(path.suffix.lower(), "image/jpeg")
+    media_type = ext_map.get(path.suffix.lower(), "image/jpeg")
 
-    model = genai.GenerativeModel(MODEL)
+    image_data = base64.standard_b64encode(image_bytes).decode("utf-8")
 
-    image_part = {
-        "inline_data": {
-            "mime_type": mime_type,
-            "data":      base64.b64encode(image_bytes).decode("utf-8"),
-        }
-    }
-
-    response = model.generate_content(
-        [ANALYSIS_PROMPT, image_part],
-        generation_config=genai.GenerationConfig(
-            temperature=0.2,   # low temp for consistent structured output
-            max_output_tokens=1024,
-        ),
+    response = await client.messages.create(
+        model=MODEL,
+        max_tokens=1024,
+        messages=[
+            {
+                "role": "user",
+                "content": [
+                    {
+                        "type": "image",
+                        "source": {
+                            "type":       "base64",
+                            "media_type": media_type,
+                            "data":       image_data,
+                        },
+                    },
+                    {
+                        "type": "text",
+                        "text": ANALYSIS_PROMPT,
+                    },
+                ],
+            }
+        ],
     )
 
-    raw = response.text.strip()
+    raw = response.content[0].text.strip()
 
-    # Strip markdown fences if Gemini adds them despite instructions
+    # Strip markdown fences if Claude adds them despite instructions
     raw = re.sub(r"^```(?:json)?\s*", "", raw)
-    raw = re.sub(r"\s*```$",          "", raw)
+    raw = re.sub(r"\s*```$", "", raw)
     raw = raw.strip()
 
     try:
         result = json.loads(raw)
     except json.JSONDecodeError:
-        # Try to extract JSON object from anywhere in the response
         match = re.search(r"\{.*\}", raw, re.DOTALL)
         if match:
             result = json.loads(match.group())
         else:
             return FALLBACK_RESULT
 
-    # Validate required fields — fall back on partial failures
+    # Validate required fields
     required = {"skin_tone", "undertone", "hex", "season", "season_description", "recommended_colors"}
     if not required.issubset(result.keys()):
         return FALLBACK_RESULT
 
-    # Ensure exactly 6 recommended_colors with required fields
     colors = result.get("recommended_colors", [])
     if len(colors) < 6:
         return FALLBACK_RESULT

@@ -15,6 +15,7 @@ from engine.prompt_engine import (
     sort_rows_by_multizone_order,
     CATEGORY_ZONE,
 )
+from routers.look_prep import router as look_prep_router
 from engine.face_validator import validate_photo
 from engine.skin_analyzer import analyze_skin_tone
 from engine.auth_deps import get_current_user, verify_public_token
@@ -50,6 +51,8 @@ app.mount("/results", StaticFiles(directory="results"), name="results")
 app.mount("/uploads", StaticFiles(directory="uploads"), name="uploads")
 app.mount("/media",   StaticFiles(directory="media"),   name="media")
 app.include_router(payments_router, prefix="/payments", tags=["payments"])
+app.include_router(look_prep_router, prefix="/look-prep", tags=["look-prep"])
+
 
 
 # ── ZONE HELPER ───────────────────────────────────────────────────

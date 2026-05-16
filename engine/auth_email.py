@@ -42,7 +42,7 @@ def send_verification_email(to_email: str, token: str) -> None:
 
     html_body = f"""
     <html><body style="font-family:sans-serif;max-width:480px;margin:auto;padding:32px">
-      <h2 style="color:#1a1a2e">Welcome to GlamAI ✨</h2>
+      <h2 style="color:#1a1a2e">Welcome to GlamAI</h2>
       <p>Please verify your email address to activate your account.</p>
       <a href="{verify_url}"
          style="display:inline-block;margin:16px 0;padding:12px 24px;

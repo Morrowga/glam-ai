@@ -148,6 +148,48 @@ class ReferenceImage(Base):
     quality_score = Column(Integer)
     shade         = relationship("Shade", back_populates="references")
 
+# ── ADD THESE TWO MODELS TO db/models.py ─────────────────────────
+# Add after the GenerationJobItem class
+# Also add to init_db() — it already calls Base.metadata.create_all so no change needed there
+
+class UserProfile(Base):
+    """
+    One row per user.
+    Stores default face photo path for Look Preparation.
+    Created lazily on first photo upload.
+    """
+    __tablename__ = "user_profiles"
+
+    id                   = Column(String,  primary_key=True, default=gen_id)
+    user_id              = Column(String,  ForeignKey("users.id"), nullable=False, unique=True)
+    default_photo_path   = Column(Text,    nullable=True)   # absolute path, validated by face_validator
+    default_photo_url    = Column(Text,    nullable=True)   # BASE_URL + /uploads/filename for display
+    created_at           = Column(DateTime, server_default=func.now())
+    updated_at           = Column(DateTime, server_default=func.now(), onupdate=func.now())
+
+    user = relationship("User")
+
+
+class UserProduct(Base):
+    """
+    One row per cosmetic product in a user's bag.
+    Created after Gemini validates the product text.
+    """
+    __tablename__ = "user_products"
+
+    id           = Column(String,  primary_key=True, default=gen_id)
+    user_id      = Column(String,  ForeignKey("users.id"), nullable=False, index=True)
+    raw_input    = Column(Text,    nullable=False)          # exactly what the user typed
+    brand        = Column(String(150), nullable=True)       # extracted by Gemini
+    product_name = Column(String(150), nullable=True)       # extracted by Gemini
+    shade        = Column(String(100), nullable=True)       # extracted or asked
+    zone         = Column(String(20),  nullable=False)      # lip | eye | cheek
+    hex_color    = Column(String(7),   nullable=True)       # best-guess hex from Gemini
+    is_active    = Column(Boolean, default=True)
+    created_at   = Column(DateTime, server_default=func.now())
+
+    user = relationship("User")
+
 class GenerationJob(Base):
     __tablename__ = "generation_jobs"
     id              = Column(String, primary_key=True, default=gen_id)
@@ -169,6 +211,8 @@ class GenerationJob(Base):
     # ── Share ──────────────────────────────────────────────────────
     share_token     = Column(String(64), unique=True, nullable=True, index=True)
     is_shared       = Column(Boolean, default=False, nullable=False)
+    look_meta       = Column(Text, nullable=True)  
+
     # ──────────────────────────────────────────────────────────────
     shade           = relationship("Shade", back_populates="jobs")
     user            = relationship("User")
